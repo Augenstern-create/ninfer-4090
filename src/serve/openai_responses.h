@@ -50,6 +50,13 @@ struct OpenAIResponsesCreateRequest {
     bool parallel_tool_calls = true;
     bool store               = true;
     bool stream              = false;
+
+    [[nodiscard]] bool uses_builtin_tools() const noexcept {
+        for (const ToolDefinition& tool : prompt.generation.tools) {
+            if (tool.execution == ToolExecution::Builtin) { return true; }
+        }
+        return false;
+    }
 };
 
 struct OpenAIResponsesResolvedPrompt {

@@ -789,7 +789,9 @@ int test_namespace_tools() {
 int test_builtin_web_declaration() {
     Json body                         = {{"model", "m"},
                                          {"input", "search"},
-                                         {"tools", Json::array({Json{{"type", "web_search"}}})}};
+                                         {"tools", Json::array({Json{{"type", "web_search"},
+                                                                      {"external_web_access",
+                                                                       true}}})}};
     int failures                      = check(api_code([&] {
                              (void)parse_openai_responses_create_request(body, limits());
                                               }) == "tool_type_not_supported",
@@ -798,16 +800,64 @@ int test_builtin_web_declaration() {
     enabled.builtin_web_tools_enabled = true;
     const OpenAIResponsesCreateRequest request =
         parse_openai_responses_create_request(body, enabled);
-    failures += check(request.tools.size() == 1 && request.tools[0].at("type") == "web_search" &&
+    failures += check(!request.stream && request.tools.size() == 1 &&
+                          request.tools[0].at("type") == "web_search" &&
+                          request.tools[0].at("external_web_access") == true &&
                           request.prompt.generation.tools.size() == 2 &&
                           request.prompt.generation.tools[0].execution == ToolExecution::Builtin &&
-                          request.prompt.generation.tools[1].execution == ToolExecution::Builtin,
+                          request.prompt.generation.tools[1].execution == ToolExecution::Builtin &&
+                          request.uses_builtin_tools(),
                       "Responses hosted declaration maps to both built-in Web functions");
     body["stream"] = true;
-    failures += check(api_code([&] {
-                          (void)parse_openai_responses_create_request(body, enabled);
-                      }) == "builtin_tools_streaming_not_supported",
-                      "Responses streaming built-in loop is rejected precisely");
+    const OpenAIResponsesCreateRequest streaming =
+        parse_openai_responses_create_request(body, enabled);
+    failures += check(streaming.stream && streaming.uses_builtin_tools(),
+                      "Responses streaming built-in Web selects buffered execution");
+
+    OpenAIResponsesEventStream encoder("resp_buffered_web", 123, streaming, {});
+    std::vector<std::string> events = encoder.start();
+    GenerationOutcome answer;
+    answer.text          = "final web answer";
+    answer.finish_reason = ninfer::FinishReason::StopToken;
+    OpenAIResponsesStreamFinish finished = encoder.finish(answer);
+    events.insert(events.end(), finished.events_before_terminal.begin(),
+                  finished.events_before_terminal.end());
+    events.push_back(encoder.terminal(finished.response));
+    std::string buffered_text;
+    for (const std::string& event : events) {
+        const Json payload = parse_event(event);
+        if (payload.at("type") == "response.output_text.delta") {
+            buffered_text += payload.at("delta").get<std::string>();
+        }
+    }
+    failures += check(parse_event(events.front()).at("type") == "response.created" &&
+                          parse_event(events.back()).at("type") == "response.completed" &&
+                          buffered_text == "final web answer",
+                      "buffered built-in outcome produces a complete Responses SSE lifecycle");
+
+    Json mixed_declarations = body;
+    mixed_declarations["tools"].push_back(
+        Json{{"type", "function"}, {"name", "client_tool"}});
+    const OpenAIResponsesCreateRequest external_request =
+        parse_openai_responses_create_request(mixed_declarations, enabled);
+    OpenAIResponsesEventStream external_encoder("resp_buffered_external", 123,
+                                                external_request, {});
+    (void)external_encoder.start();
+    GenerationOutcome external;
+    external.finish_reason = ninfer::FinishReason::StopToken;
+    external.tool_calls.push_back(
+        ninfer::GeneratedToolCall{.name = "client_tool", .arguments_json = R"({"x":1})"});
+    const OpenAIResponsesStreamFinish external_finish = external_encoder.finish(external);
+    bool emitted_external_call = false;
+    for (const std::string& event : external_finish.events_before_terminal) {
+        const Json payload = parse_event(event);
+        if (payload.at("type") == "response.output_item.done" &&
+            payload.at("item").at("type") == "function_call") {
+            emitted_external_call = payload.at("item").at("name") == "client_tool";
+        }
+    }
+    failures += check(external_request.uses_builtin_tools() && emitted_external_call,
+                      "buffered built-in continuation returns client tools without executing them");
     return failures;
 }
 
@@ -1026,7 +1076,13 @@ int test_response_object() {
 
 int test_sse_sequence_and_failures() {
     OpenAIResponsesCreateRequest request = parse_openai_responses_create_request(
-        Json{{"model", "m"}, {"input", "hello"}, {"stream", true}}, limits());
+        Json{{"model", "m"},
+             {"input", "hello"},
+             {"stream", true},
+             {"tools", Json::array({Json{{"type", "function"}, {"name", "client_tool"}}})}},
+        limits());
+    int failures = check(!request.uses_builtin_tools(),
+                         "ordinary client tools retain the live Responses streaming path");
     OpenAIResponsesEventStream encoder("resp_stream", 123, request, {});
     std::vector<std::string> wire = encoder.start();
     std::vector<std::string> next = encoder.reasoning_delta("thought");
@@ -1038,7 +1094,6 @@ int test_sse_sequence_and_failures() {
                 finish.events_before_terminal.end());
     wire.push_back(encoder.terminal(finish.response));
 
-    int failures                    = 0;
     std::uint64_t expected_sequence = 0;
     std::string text_deltas;
     for (const std::string& event : wire) {

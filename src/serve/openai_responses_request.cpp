@@ -1237,13 +1237,6 @@ OpenAIResponsesCreateRequest parse_openai_responses_create_request(const Json& b
     out.parallel_tool_calls = parsed.parallel_tool_calls;
     out.store               = optional_bool(body, "store", true);
     out.stream              = optional_bool(body, "stream", false);
-    if (out.stream && out.prompt.generation.uses_tools() &&
-        std::any_of(
-            out.prompt.generation.tools.begin(), out.prompt.generation.tools.end(),
-            [](const ToolDefinition& tool) { return tool.execution == ToolExecution::Builtin; })) {
-        bad_request("streaming built-in tool continuation is not supported; set stream=false",
-                    "stream", "builtin_tools_streaming_not_supported");
-    }
     validate_metadata(body, out.metadata);
 
     // Codex attaches per-request tracing information here. It is an opaque client hint and has no

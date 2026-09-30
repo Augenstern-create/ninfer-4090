@@ -39,6 +39,9 @@ struct StreamingResponse {
     PreparedRequest prepared;
     PendingResponseStorage storage;
     std::unique_ptr<OpenAIResponsesEventStream> encoder;
+    std::optional<GenerationRequest> builtin_request;
+    std::optional<std::size_t> max_tool_calls;
+    ContextCacheHints cache_hints;
     std::atomic<bool> cancelled{false};
     std::atomic<bool> started{false};
 };
@@ -91,6 +94,13 @@ void commit_stored_response(OpenAIResponsesStore& store, PendingResponseStorage 
                                       std::move(pending.input_turns), std::move(output_history));
     stored.preserve_thinking = preserve_thinking;
     store.put(std::move(stored));
+}
+
+void retain_builtin_history(PendingResponseStorage& storage, GenerationOutcome& outcome) {
+    storage.input_turns.insert(storage.input_turns.end(),
+                               std::make_move_iterator(outcome.builtin_history.begin()),
+                               std::make_move_iterator(outcome.builtin_history.end()));
+    outcome.builtin_history.clear();
 }
 
 OpenAIResponsesRuntimeValues runtime_values(const PreparedRequest& prepared,
@@ -267,12 +277,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         .output_tokens_explicit            = request.requested_max_output_tokens.has_value(),
         .preserve_thinking_semantic_change = resolved.preserve_thinking_semantic_change,
     };
+    const bool buffered_builtin_stream = request.stream && request.uses_builtin_tools();
     PreparedRequest prepared;
     try {
-        prepared = service_->prepare(
-            resolved.generation,
-            request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-            {}, [&req] { return client_disconnected(req); }, resolved.cache_hints);
+        const GenerationConsumerMode consumer_mode =
+            request.stream && !buffered_builtin_stream ? GenerationConsumerMode::Streaming
+                                                       : GenerationConsumerMode::Aggregate;
+        prepared = service_->prepare(resolved.generation, consumer_mode, {},
+                                     [&req] { return client_disconnected(req); },
+                                     resolved.cache_hints);
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(
@@ -331,9 +344,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
 
         PendingResponseStorage storage;
         storage.input_turns = std::move(request.prompt.input_turns);
-        storage.input_turns.insert(storage.input_turns.end(),
-                                   std::make_move_iterator(outcome.builtin_history.begin()),
-                                   std::make_move_iterator(outcome.builtin_history.end()));
+        retain_builtin_history(storage, outcome);
         storage.input_items      = std::move(request.prompt.input_items);
         storage.previous_context = std::move(resolved.parent);
         if (resolved.session_key) { storage.session_key = std::move(*resolved.session_key); }
@@ -374,6 +385,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             stream->storage.session_key = std::move(*resolved.session_key);
         }
         stream->storage.enabled = request.store;
+        if (buffered_builtin_stream) {
+            stream->builtin_request = std::move(resolved.generation);
+            stream->max_tool_calls =
+                request.max_tool_calls
+                    ? std::optional<std::size_t>(
+                          static_cast<std::size_t>(*request.max_tool_calls))
+                    : std::nullopt;
+            stream->cache_hints = std::move(resolved.cache_hints);
+        }
         stream->encoder         = std::make_unique<OpenAIResponsesEventStream>(
             id, created, std::move(request), runtime_values(stream->prepared));
 
@@ -416,18 +436,27 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
 
                 GenerationOutcome outcome;
                 try {
-                    StreamSink output;
-                    output.on_reasoning = [&](const std::string& text) {
-                        render_and_write(transport,
-                                         [&] { return stream->encoder->reasoning_delta(text); });
-                    };
-                    output.on_content = [&](const std::string& text) {
-                        render_and_write(transport,
-                                         [&] { return stream->encoder->content_delta(text); });
-                    };
-                    output.is_cancelled = [&] { return transport.poll(); };
+                    if (stream->builtin_request) {
+                        outcome = service_->run_with_builtin_tools(
+                            std::move(*stream->builtin_request), stream->prepared,
+                            stream->max_tool_calls, [&] { return transport.poll(); },
+                            stream->cache_hints);
+                        retain_builtin_history(stream->storage, outcome);
+                    } else {
+                        StreamSink output;
+                        output.on_reasoning = [&](const std::string& text) {
+                            render_and_write(
+                                transport,
+                                [&] { return stream->encoder->reasoning_delta(text); });
+                        };
+                        output.on_content = [&](const std::string& text) {
+                            render_and_write(transport,
+                                             [&] { return stream->encoder->content_delta(text); });
+                        };
+                        output.is_cancelled = [&] { return transport.poll(); };
 
-                    outcome = service_->run(stream->prepared, &output);
+                        outcome = service_->run(stream->prepared, &output);
+                    }
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));

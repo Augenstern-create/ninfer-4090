@@ -464,13 +464,14 @@ docker run -d --name searxng --restart unless-stopped \
 curl 'http://127.0.0.1:8081/search?q=nvidia&format=json'
 ```
 
-The first implementation supports aggregate requests only. A request with callable built-in tools
-and `stream:true` fails before generation with `builtin_tools_streaming_not_supported`; no partial
-SSE response is emitted. This is intentional because the current encoders publish first-round
-tokens before a terminal tool-call decision and cannot retract them for a hidden continuation.
-ChatGPT Desktop and Codex clients may use `stream:true` by default, so they cannot currently use
-this built-in Web path without selecting a non-streaming Responses request. Built-in Web is not
-claimed as fully compatible with either client yet.
+OpenAI Responses accepts `stream:true` with callable built-in tools through a buffered SSE
+compatibility path. It immediately emits the Responses stream start, runs every built-in tool and
+generation continuation through the aggregate Engine path, then emits the final reasoning, text,
+or client function call as one valid SSE lifecycle. It does not provide token deltas while a
+built-in continuation is running; SSE keep-alive comments may be sent during that interval.
+Requests containing only client-executed function, namespace, or MCP tools keep the ordinary live
+token streaming path. OpenAI Chat Completions and Anthropic Messages still reject streaming
+built-in continuation.
 Multiple built-in calls in one round execute serially. `--max-builtin-tool-rounds` bounds repeated
 generation, and Responses `max_tool_calls` additionally bounds built-in executions. If a model
 emits built-in and external calls together, the request fails before any tool executes with
@@ -478,10 +479,11 @@ emits built-in and external calls together, the request fails before any tool ex
 storing history that cannot be represented consistently by Chat Completions, Responses
 (`function_call_output`, `previous_response_id`, and `store`), and Anthropic `tool_result`.
 
-For non-streaming built-in continuations, `prompt_tokens`, `completion_tokens`, and
-`reasoning_tokens` are sums across every internal Engine generation. Timing, prefix-cache,
-speculative-decoding, engine-timing, and materialization metrics are retained together from the
-terminal generation round; no metric family mixes cumulative and terminal-round fields.
+For aggregate and buffered-streaming built-in continuations, `prompt_tokens`,
+`completion_tokens`, and `reasoning_tokens` are sums across every internal Engine generation.
+Timing, prefix-cache, speculative-decoding, engine-timing, and materialization metrics are retained
+together from the terminal generation round; no metric family mixes cumulative and terminal-round
+fields.
 
 OpenAI Responses accepts the hosted-style capability declaration when Web tools are enabled. It
 maps the declaration to local `web_search` and `web_open` functions without claiming OpenAI-hosted
@@ -752,6 +754,13 @@ and content indices remain stable, and concatenated deltas equal the terminal It
 does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
 streams immediately; only an ambiguous `<tool_call>` suffix or the structured tool region is held.
 Malformed tool markup is flushed back as ordinary text without losing bytes.
+
+The live-delta behavior above applies to requests without server-executed built-in tools. Responses
+requests containing built-in Web tools use the buffered compatibility path described in
+[Built-in Web tools](#built-in-web-tools): `response.created` and `response.in_progress` are sent
+first, but generated reasoning/text/function-call events are emitted only after all internal tool
+continuations finish. A terminal client-executed function call is returned normally and is never
+executed by NInfer.
 
 ### Local response state and resources
 
