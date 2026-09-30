@@ -309,6 +309,19 @@ int test_tools() {
     failures +=
         check(parse(body).generation.tools.empty(), "tool_choice auto is neutral without tools");
 
+    body                                 = base_request();
+    body["tools"]                        = Json::array({function_tool("web_search")});
+    RequestLimits web_limits             = limits();
+    web_limits.builtin_web_tools_enabled = true;
+    const OpenAIChatRequest builtin      = parse_chat_completion_request(body, web_limits);
+    failures += check(builtin.generation.tools[0].execution == ToolExecution::Builtin,
+                      "Chat Completions exposes web_search through function tools");
+    body["stream"] = true;
+    failures += check(api_error([&] {
+                          (void)parse_chat_completion_request(body, web_limits);
+                      }).code == "builtin_tools_streaming_not_supported",
+                      "Chat Completions rejects streaming built-in continuation precisely");
+
     Json history = base_request();
     history["messages"] =
         Json::array({Json{{"role", "user"}, {"content", "weather?"}},
@@ -567,9 +580,9 @@ int test_reasoning_and_extensions() {
                       "a null reasoning effort alias is neutral");
     body["chat_template_kwargs"]     = Json{{"reasoning_effort", 3}};
     const ApiError effort_not_string = api_error([&] { (void)parse(body); });
-    failures += check(effort_not_string.status == 400 &&
-                          effort_not_string.param == "chat_template_kwargs",
-                      "non-string reasoning effort alias rejected");
+    failures +=
+        check(effort_not_string.status == 400 && effort_not_string.param == "chat_template_kwargs",
+              "non-string reasoning effort alias rejected");
     body["chat_template_kwargs"]      = Json{{"reasoning_effort", "turbo"}};
     const ApiError effort_not_a_value = api_error([&] { (void)parse(body); });
     failures += check(effort_not_a_value.status == 400 &&
@@ -810,8 +823,7 @@ int test_common_objects() {
     failures += check(models["data"][0]["context_window"] == 240000 &&
                           models["data"][0]["modalities"]["vision"] == false,
                       "models list carries context_window and text-only modalities");
-    failures += check(model["context_window"] == 240000 &&
-                          model["modalities"]["vision"] == false,
+    failures += check(model["context_window"] == 240000 && model["modalities"]["vision"] == false,
                       "model lookup carries context_window and text-only modalities");
     const Json vision_models = Json::parse(make_models_list("qwen", 7, 240000, true));
     const Json vision_model  = Json::parse(make_model_object("qwen", 7, 240000, true));

@@ -406,6 +406,115 @@ rendered-token frontier is ignored without changing prompt content. `prompt_cach
 Engine session key or prefix identity. Valid TTL/retention values are accepted, but NInfer does not
 promise their wall-clock residency; physical retention follows the resource scheduler.
 
+## Built-in Web tools
+
+NInfer has an optional protocol-independent built-in tool runtime in the serving/product layer.
+It is disabled by default. When enabled, `web_search` and `web_open` are rendered as ordinary
+function tools for the resident model, but calls to those two reserved names are executed by the
+server. The server appends the assistant call and tool result to protocol-neutral history, prepares
+the continued prompt through the same public Engine route, and generates again. Ordinary function
+and MCP tools remain client-executed and are never sent to the built-in executor.
+
+Start Serve with a SearXNG JSON endpoint:
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+  --enable-builtin-web-tools \
+  --searxng-url http://127.0.0.1:8081 \
+  --web-search-timeout-ms 10000 \
+  --web-search-max-results 5 \
+  --web-open-max-bytes 1048576 \
+  --max-builtin-tool-rounds 4
+```
+
+`web_search` accepts `{"query":"..."}`. Its backend calls
+`SEARXNG_URL/search?q=...&format=json` and returns bounded title/URL/snippet records. The configured
+SearXNG address is a trusted startup dependency and may be on a private address. `web_open` accepts
+`{"url":"https://..."}`, follows at most three redirects, accepts textual response types, strips
+HTML markup/script/style content, and never runs JavaScript.
+
+`web_open` resolves and pins the destination address before every request, including every
+redirect. It permits only credential-free HTTP(S) URLs and rejects loopback, RFC1918/unique-local,
+link-local, unspecified, multicast and metadata-address destinations by
+default. `--web-allow-private-network` is an explicit process-wide opt-in for trusted networks; do
+not use it for requests from untrusted clients. TLS verification remains enabled and proxy
+environment variables are ignored so they cannot bypass destination validation.
+
+A minimal local SearXNG deployment can use this `settings.yml`:
+
+```yaml
+use_default_settings: true
+server:
+  secret_key: replace-with-a-long-random-value
+search:
+  formats: [html, json]
+```
+
+```bash
+docker run -d --name searxng --restart unless-stopped \
+  -p 127.0.0.1:8081:8080 \
+  -v "$PWD/settings.yml:/etc/searxng/settings.yml:ro" \
+  searxng/searxng:latest
+curl 'http://127.0.0.1:8081/search?q=nvidia&format=json'
+```
+
+The first implementation supports aggregate requests only. A request with callable built-in tools
+and `stream:true` fails before generation with `builtin_tools_streaming_not_supported`; no partial
+SSE response is emitted. This is intentional because the current encoders publish first-round
+tokens before a terminal tool-call decision and cannot retract them for a hidden continuation.
+Multiple built-in calls in one round execute serially. `--max-builtin-tool-rounds` bounds repeated
+generation, and Responses `max_tool_calls` additionally bounds built-in executions. If a model
+emits built-in and external calls together, NInfer executes and records only the built-in calls,
+then returns the external calls without starting a continuation that lacks their client results.
+
+OpenAI Responses accepts the hosted-style capability declaration when Web tools are enabled. It
+maps the declaration to local `web_search` and `web_open` functions without claiming OpenAI-hosted
+wire events or citation semantics:
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.8-27b",
+    "input":"Find the current CUDA release notes and summarize the main changes.",
+    "tools":[{"type":"web_search"}],
+    "max_tool_calls":4,
+    "stream":false
+  }'
+```
+
+Chat Completions and Anthropic Messages use their existing function/tool shapes; the names
+`web_search` and `web_open` are reserved for server execution while the feature is enabled:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.8-27b",
+    "messages":[{"role":"user","content":"Find and open the CUDA release notes."}],
+    "tools":[
+      {"type":"function","function":{"name":"web_search","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+      {"type":"function","function":{"name":"web_open","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}
+    ],
+    "stream":false
+  }'
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.8-27b",
+    "max_tokens":512,
+    "messages":[{"role":"user","content":"Find and open the CUDA release notes."}],
+    "tools":[
+      {"name":"web_search","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},
+      {"name":"web_open","description":"Open a web page","input_schema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}
+    ],
+    "stream":false
+  }'
+```
+
 ## OpenAI Responses Core
 
 NInfer implements the typed-Item and semantic-event core of the OpenAI
@@ -468,7 +577,7 @@ wire response contains typed `output` Items.
 | `tools` | direct function definitions or namespace groups containing function definitions; see below |
 | `tool_choice` | `auto`, `none`, or function-only `allowed_tools` with mode `auto`; a namespaced selection carries both `namespace` and `name` |
 | `parallel_tool_calls` | `true` by default; `false` is accepted only when no effective tool is callable |
-| `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
+| `max_tool_calls` | non-negative integer bounding local built-in executions; neutral when no built-in tool is callable |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
 | `top_logprobs` | omitted or `0` |
 | `service_tier` | omitted, `auto`, or `default`; the response reports `default` |
@@ -564,10 +673,11 @@ undeclared model output remains ordinary text. `allowed_tools` with mode `auto` 
 without changing declaration order, while `tool_choice:"none"` disables structured tool output even
 when the history contains earlier calls.
 
-NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
-tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
-invocation are also rejected because their semantics cannot be honored.
+NInfer does not execute external functions or enforce JSON Schema through constrained decoding.
+The optional local Web runtime is the only built-in executor and is documented above. Therefore
+`strict:true`, required or named tool choice, remote MCP tools, and custom free-form tools are
+rejected. Other hosted tools, deferred loading, output schemas, and caller restrictions that
+exclude direct invocation are also rejected because their semantics cannot be honored.
 
 ### Response object and usage
 
@@ -827,6 +937,13 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--auto-save-evicted` | spill an involuntarily evicted session back to its bound slot file; requires `--slot-save-path` | off |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
+| `--enable-builtin-web-tools` | enable the serving-layer `web_search` and `web_open` executor; requires `--searxng-url` | off |
+| `--searxng-url URL` | trusted SearXNG base URL used for JSON search | unset |
+| `--web-search-timeout-ms N` | SearXNG and `web_open` request timeout | `10000` |
+| `--web-search-max-results N` | maximum SearXNG results returned to the model | `5` |
+| `--web-open-max-bytes N` | maximum response body accepted by `web_open` | `1048576` |
+| `--max-builtin-tool-rounds N` | maximum server-side generation/tool continuation rounds | `4` |
+| `--web-allow-private-network` | allow `web_open` to reach private/loopback/link-local networks | off |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8` | KV-cache storage; rotated and E8-lattice modes trade key/value precision for capacity; `nvfp4` and `k8v4` are upstream sm_120a modes, not available on the RTX 4090 | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
@@ -1050,8 +1167,9 @@ a following compatible turn can reuse it. Output-limit and context-capacity fini
 `length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
 
 Function tools are rendered into the model prompt and generated calls are parsed into protocol
-responses. NInfer does not execute tools and does not enforce client JSON Schema through constrained
-decoding.
+responses. External tools remain client-executed. When explicitly enabled, the serving-layer Web
+runtime executes only the reserved `web_search` and `web_open` identities; Engine and CUDA remain
+unaware of tool policy. NInfer does not enforce client JSON Schema through constrained decoding.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.

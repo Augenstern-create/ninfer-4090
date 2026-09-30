@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,8 +27,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     OpenAIChatRequest request;
     try {
         RequestLimits limits;
-        limits.default_max_tokens = options_.default_max_tokens;
-        request                   = parse_chat_completion_request(parse_json_body(req), limits);
+        limits.default_max_tokens        = options_.default_max_tokens;
+        limits.builtin_web_tools_enabled = options_.builtin_web.enabled;
+        request = parse_chat_completion_request(parse_json_body(req), limits);
         validate_openai_model(request.model, public_model_id_);
     } catch (const ApiException& exception) {
         write_openai_error(res, exception.error());
@@ -72,7 +74,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     if (!request.stream) {
         GenerationOutcome outcome;
         try {
-            outcome = service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
+            outcome = service_->run_with_builtin_tools(request.generation, prepared, std::nullopt,
+                                                       [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             lifecycle->failure(make_generation_request_failure(exception.error()));
             write_openai_error(res, exception.error());

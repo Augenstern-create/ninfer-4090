@@ -169,11 +169,11 @@ int test_message_normalization() {
                      Json{{"role", "assistant"}, {"content", "prefix"}}});
 
     const GenerationRequest request = parse(body).generation;
-    int failures                    = check(request.messages.size() == 3 &&
-                                                request.messages[0].role == ninfer::ChatRole::System &&
-                                                request.messages[1].role == ninfer::ChatRole::User &&
-                                                request.messages[1].content.size() == 3,
-                                            "consecutive Anthropic roles were not merged by block concatenation");
+    int failures = check(request.messages.size() == 3 &&
+                             request.messages[0].role == ninfer::ChatRole::System &&
+                             request.messages[1].role == ninfer::ChatRole::User &&
+                             request.messages[1].content.size() == 3,
+                         "consecutive Anthropic roles were not merged by block concatenation");
     failures += check(request.messages[0].content[0].text == "A" &&
                           request.messages[0].content[1].text == "B" &&
                           request.messages[1].content[0].text == "one" &&
@@ -199,10 +199,10 @@ int test_attribution_system_block() {
         body["thinking"] = Json{{"type", "disabled"}};
         body["system"]   = Json::array(
             {Json{{"type", "text"},
-                    {"text", "x-anthropic-billing-header: cc_version=2.1; cch=" + fingerprint}},
-               Json{{"type", "text"},
-                    {"text", "real system"},
-                    {"cache_control", Json{{"type", "ephemeral"}}}}});
+                  {"text", "x-anthropic-billing-header: cc_version=2.1; cch=" + fingerprint}},
+             Json{{"type", "text"},
+                  {"text", "real system"},
+                  {"cache_control", Json{{"type", "ephemeral"}}}}});
         return body;
     };
 
@@ -290,22 +290,22 @@ int test_tool_history() {
                                             {"cache_control", Json{{"type", "ephemeral"}}}},
                                        tool_result("toolu_a", "result A"),
                                        Json{{"type", "text"}, {"text", "continue"}}})}}});
-    const GenerationRequest normalized          = parse(body).generation;
-    int failures                                = check(normalized.messages.size() == 4 &&
-                                                            normalized.messages[0].role == ninfer::ChatRole::Assistant &&
-                                                            normalized.messages[1].role == ninfer::ChatRole::Tool &&
-                                                            normalized.messages[1].tool_call_id == "toolu_a" &&
-                                                            normalized.messages[1].content[0].text == "result A" &&
-                                                            normalized.messages[2].role == ninfer::ChatRole::Tool &&
-                                                            normalized.messages[2].tool_call_id == "toolu_b" &&
-                                                            normalized.messages[2].content[0].text == "result B" &&
-                                                            normalized.messages[2].tool_result_is_error &&
-                                                            normalized.messages[2].cache_boundary_after &&
-                                                            normalized.messages[2].cache_boundary_after->kind ==
-                                                                ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
-                                                            normalized.messages[3].role == ninfer::ChatRole::User &&
-                                                            normalized.messages[3].content[0].text == "continue",
-                                                        "valid out-of-order tool results were not associated by ID");
+    const GenerationRequest normalized = parse(body).generation;
+    int failures = check(normalized.messages.size() == 4 &&
+                             normalized.messages[0].role == ninfer::ChatRole::Assistant &&
+                             normalized.messages[1].role == ninfer::ChatRole::Tool &&
+                             normalized.messages[1].tool_call_id == "toolu_a" &&
+                             normalized.messages[1].content[0].text == "result A" &&
+                             normalized.messages[2].role == ninfer::ChatRole::Tool &&
+                             normalized.messages[2].tool_call_id == "toolu_b" &&
+                             normalized.messages[2].content[0].text == "result B" &&
+                             normalized.messages[2].tool_result_is_error &&
+                             normalized.messages[2].cache_boundary_after &&
+                             normalized.messages[2].cache_boundary_after->kind ==
+                                 ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
+                             normalized.messages[3].role == ninfer::ChatRole::User &&
+                             normalized.messages[3].content[0].text == "continue",
+                         "valid out-of-order tool results were not associated by ID");
     const ninfer::PromptInput normalized_prompt = prompt(normalized);
     failures += check(normalized_prompt.messages[2].parts.size() == 2 &&
                           normalized_prompt.messages[2].parts[0].text == "[tool_error]\n" &&
@@ -422,6 +422,20 @@ int test_tools() {
     failures += check(api_code([&] { (void)parse(body); }).empty(),
                       "inactive Anthropic-provided tool unnecessarily blocked generation");
 
+    body                                   = base_request();
+    Json builtin_tool                      = ordinary_tool();
+    builtin_tool["name"]                   = "web_open";
+    body["tools"]                          = Json::array({builtin_tool});
+    RequestLimits web_limits               = limits();
+    web_limits.builtin_web_tools_enabled   = true;
+    const AnthropicMessagesRequest builtin = parse_anthropic_messages_request(body, web_limits);
+    failures += check(builtin.generation.tools[0].execution == ToolExecution::Builtin,
+                      "Anthropic Messages exposes web_open through ordinary tools");
+    body["stream"] = true;
+    failures += check(api_code([&] { (void)parse_anthropic_messages_request(body, web_limits); }) ==
+                          "builtin_tools_streaming_not_supported",
+                      "Anthropic rejects streaming built-in continuation precisely");
+
     body          = base_request();
     body["tools"] = Json::array({ordinary_tool(), ordinary_tool()});
     failures += check(api_param([&] { (void)parse(body); }) == "tools",
@@ -518,10 +532,10 @@ int test_thinking_history_transport_metadata() {
                                                    Json{{"type", "text"}, {"text", "answer"}}})}},
                      Json{{"role", "user"}, {"content", "after"}}});
     const GenerationRequest accepted = parse(body).generation;
-    int failures                     = check(accepted.messages.size() == 3 &&
-                                                 accepted.messages[1].reasoning_content == "thought" &&
-                                                 accepted.messages[1].content[0].text == "answer",
-                                             "Thinking history with opaque transport metadata was not lowered");
+    int failures = check(accepted.messages.size() == 3 &&
+                             accepted.messages[1].reasoning_content == "thought" &&
+                             accepted.messages[1].content[0].text == "answer",
+                         "Thinking history with opaque transport metadata was not lowered");
 
     Json changed_signature                                      = body;
     changed_signature["messages"][1]["content"][0]["signature"] = "different";
@@ -558,23 +572,23 @@ int test_content_and_cache_hints() {
     Json body                       = base_request();
     body["cache_control"]           = Json{{"type", "ephemeral"}, {"ttl", "5m"}};
     body["messages"]                = Json::array({Json{
-                       {"role", "user"},
-                       {"content",
-                        Json::array({Json{{"type", "text"},
-                                          {"text", "look"},
-                                          {"cache_control", Json{{"type", "ephemeral"}}}},
-                                     Json{{"type", "image"},
-                                          {"source", Json{{"type", "url"}, {"url", "https://example/image.png"}}},
-                                          {"transformations", Json{{"oversized_image", "error"}}}}})}}});
+        {"role", "user"},
+        {"content",
+         Json::array({Json{{"type", "text"},
+                           {"text", "look"},
+                           {"cache_control", Json{{"type", "ephemeral"}}}},
+                      Json{{"type", "image"},
+                           {"source", Json{{"type", "url"}, {"url", "https://example/image.png"}}},
+                           {"transformations", Json{{"oversized_image", "error"}}}}})}}});
     const GenerationRequest request = parse(body).generation;
-    int failures                    = check(request.messages[0].content[1].cache_boundary_after &&
-                                                ninfer::has_shared_candidate_evidence(
+    int failures = check(request.messages[0].content[1].cache_boundary_after &&
+                             ninfer::has_shared_candidate_evidence(
                                  request.messages[0].content[1].cache_boundary_after->evidence,
                                  ninfer::SharedCandidateEvidence::RequestedAutomatic) &&
-                                                request.media_item_count() == 1 &&
-                                                request.messages[0].content[1].image_resize_policy ==
-                                                    ninfer::ImageResizePolicy::RejectOversized,
-                                            "automatic caching or image transformation policy was lost");
+                             request.media_item_count() == 1 &&
+                             request.messages[0].content[1].image_resize_policy ==
+                                 ninfer::ImageResizePolicy::RejectOversized,
+                         "automatic caching or image transformation policy was lost");
     const ninfer::PromptInput translated = prompt(request);
     failures += check(translated.context_cache.markers.size() == 2 &&
                           translated.context_cache.markers[1].location ==

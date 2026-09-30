@@ -1,10 +1,13 @@
 #include "serve/openai_responses.h"
+#include "serve/builtin_tools.h"
 #include "serve/openai_common.h"
 #include "serve/request_validation.h"
 
 #include <algorithm>
+#include <iomanip>
 #include <iterator>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -66,12 +69,18 @@ std::string lower_function_identity(
     const OpenAIResponsesFunctionIdentity& identity,
     std::unordered_map<std::string, OpenAIResponsesFunctionIdentity>& identities,
     const char* param) {
-    const std::string engine_name =
+    const std::string flattened =
         identity.wire_namespace ? *identity.wire_namespace + "__" + identity.name : identity.name;
-    if (!valid_tool_name(engine_name, 64)) {
-        bad_request("flattened function identity '" + engine_name +
-                        "' exceeds the Engine tool-name contract [A-Za-z0-9_-]{1,64}",
-                    param, "invalid_tool_name");
+    std::string engine_name = flattened;
+    if (flattened.size() > 64) {
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (const unsigned char byte : flattened) {
+            hash ^= byte;
+            hash *= 1099511628211ULL;
+        }
+        std::ostringstream suffix;
+        suffix << std::hex << std::setw(16) << std::setfill('0') << hash;
+        engine_name = flattened.substr(0, 47) + "_" + suffix.str();
     }
     const auto [position, inserted] = identities.emplace(engine_name, identity);
     if (!inserted && position->second != identity) {
@@ -671,7 +680,8 @@ struct ParsedFunctionTool {
 ParsedFunctionTool
 parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
                     std::string_view namespace_description,
-                    std::unordered_map<std::string, OpenAIResponsesFunctionIdentity>& identities) {
+                    std::unordered_map<std::string, OpenAIResponsesFunctionIdentity>& identities,
+                    bool builtin_web_enabled) {
     static const std::unordered_set<std::string> allowed_members = {
         "type",          "name",         "description", "parameters", "strict", "allowed_callers",
         "defer_loading", "output_schema"};
@@ -682,6 +692,10 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
     ParsedFunctionTool parsed;
     parsed.engine_name     = lower_function_identity(identity, identities, "tools");
     parsed.definition.name = parsed.engine_name;
+    if (builtin_web_enabled && !identity.wire_namespace &&
+        (identity.name == kWebSearchToolName || identity.name == kWebOpenToolName)) {
+        parsed.definition.execution = ToolExecution::Builtin;
+    }
 
     std::string function_description;
     if (item.contains("description") && !item.at("description").is_null()) {
@@ -764,7 +778,7 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
     return parsed;
 }
 
-void parse_tools(const Json& body, ParsedPromptFields& out) {
+void parse_tools(const Json& body, ParsedPromptFields& out, const RequestLimits& limits) {
     if (!body.contains("tools") || body.at("tools").is_null()) { return; }
     if (!body.at("tools").is_array()) { bad_request("tools must be an array", "tools"); }
 
@@ -787,8 +801,34 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
         }
         const std::string type = item.at("type").get<std::string>();
         if (type == "function") {
-            out.wire_tools.push_back(
-                append_function(parse_function_tool(item, std::nullopt, {}, out.tool_identities)));
+            out.wire_tools.push_back(append_function(parse_function_tool(
+                item, std::nullopt, {}, out.tool_identities, limits.builtin_web_tools_enabled)));
+            continue;
+        }
+        if (type == "web_search") {
+            if (!limits.builtin_web_tools_enabled) {
+                bad_request("tool type 'web_search' requires built-in Web tools to be enabled",
+                            "tools", "tool_type_not_supported");
+            }
+            static const std::unordered_set<std::string> allowed_web_search = {"type"};
+            reject_nonnull_unknown_members(item, allowed_web_search, "tools");
+            ParsedFunctionTool search;
+            search.definition  = web_search_tool_definition();
+            search.engine_name = search.definition.name;
+            search.canonical   = item;
+            (void)append_function(std::move(search));
+            ParsedFunctionTool open;
+            open.definition  = web_open_tool_definition();
+            open.engine_name = open.definition.name;
+            open.canonical   = Json::object();
+            (void)append_function(std::move(open));
+            out.tool_identities.emplace(
+                std::string(kWebSearchToolName),
+                OpenAIResponsesFunctionIdentity{.name = std::string(kWebSearchToolName)});
+            out.tool_identities.emplace(
+                std::string(kWebOpenToolName),
+                OpenAIResponsesFunctionIdentity{.name = std::string(kWebOpenToolName)});
+            out.wire_tools.push_back(item);
             continue;
         }
         if (type != "namespace") {
@@ -828,8 +868,9 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
                                 "' cannot be represented by the Engine",
                             "tools", "tool_type_not_supported");
             }
-            canonical["tools"].push_back(append_function(parse_function_tool(
-                nested, namespace_name, namespace_description, out.tool_identities)));
+            canonical["tools"].push_back(append_function(
+                parse_function_tool(nested, namespace_name, namespace_description,
+                                    out.tool_identities, limits.builtin_web_tools_enabled)));
         }
         out.wire_tools.push_back(std::move(canonical));
     }
@@ -1040,7 +1081,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
         out.prompt.previous_response_id = body.at("previous_response_id").get<std::string>();
     }
 
-    parse_tools(body, out);
+    parse_tools(body, out, limits);
     parse_tool_choice(body, out);
     out.parallel_tool_calls = optional_bool(body, "parallel_tool_calls", true);
     if (!out.parallel_tool_calls && out.prompt.generation.uses_tools()) {
@@ -1174,6 +1215,13 @@ OpenAIResponsesCreateRequest parse_openai_responses_create_request(const Json& b
     out.parallel_tool_calls = parsed.parallel_tool_calls;
     out.store               = optional_bool(body, "store", true);
     out.stream              = optional_bool(body, "stream", false);
+    if (out.stream && out.prompt.generation.uses_tools() &&
+        std::any_of(
+            out.prompt.generation.tools.begin(), out.prompt.generation.tools.end(),
+            [](const ToolDefinition& tool) { return tool.execution == ToolExecution::Builtin; })) {
+        bad_request("streaming built-in tool continuation is not supported; set stream=false",
+                    "stream", "builtin_tools_streaming_not_supported");
+    }
     validate_metadata(body, out.metadata);
 
     // Codex attaches per-request tracing information here. It is an opaque client hint and has no

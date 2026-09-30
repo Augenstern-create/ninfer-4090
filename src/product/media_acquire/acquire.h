@@ -44,6 +44,17 @@ struct Policy {
     std::function<bool()> is_cancelled;
 };
 
+// A security-checked HTTP(S) response. DNS is resolved before each request and the selected
+// address is pinned in libcurl, so every redirect is independently checked against Policy.
+struct HttpResponse {
+    std::vector<std::uint8_t> bytes;
+    std::string content_type;
+    std::string final_url;
+    long status = 0;
+};
+
+HttpResponse acquire_http(std::string url, const Policy& policy = {});
+
 std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& policy = {});
 
 } // namespace ninfer::product::media_acquire

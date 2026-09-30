@@ -1,4 +1,5 @@
 #include "serve/openai_chat.h"
+#include "serve/builtin_tools.h"
 #include "serve/openai_common.h"
 #include "serve/request_validation.h"
 
@@ -586,7 +587,7 @@ void parse_messages(const Json& body, GenerationRequest& output) {
     }
 }
 
-void parse_tools(const Json& body, GenerationRequest& output) {
+void parse_tools(const Json& body, GenerationRequest& output, const RequestLimits& limits) {
     if (!body.contains("tools") || body.at("tools").is_null()) { return; }
     const Json& tools = body.at("tools");
     if (!tools.is_array()) { bad_request("tools must be an array", "tools"); }
@@ -608,6 +609,10 @@ void parse_tools(const Json& body, GenerationRequest& output) {
         const Json& function = item.at("function");
         ToolDefinition tool;
         tool.name = require_function_name(function, "tools");
+        if (limits.builtin_web_tools_enabled &&
+            (tool.name == kWebSearchToolName || tool.name == kWebOpenToolName)) {
+            tool.execution = ToolExecution::Builtin;
+        }
         if (function.contains("description") && !function.at("description").is_null()) {
             if (!function.at("description").is_string()) {
                 bad_request("function description must be a string", "tools");
@@ -918,13 +923,20 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
 
     const OpenAIPromptCachePolicy cache_policy = parse_openai_prompt_cache_policy(body);
 
-    parse_tools(body, output.generation);
+    parse_tools(body, output.generation, limits);
     parse_tool_choice(body, output.generation);
     parse_parallel_tool_calls(body, output.generation);
     parse_messages(body, output.generation);
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
     parse_stream_options(body, output);
+    if (output.stream && output.generation.uses_tools() &&
+        std::any_of(
+            output.generation.tools.begin(), output.generation.tools.end(),
+            [](const ToolDefinition& tool) { return tool.execution == ToolExecution::Builtin; })) {
+        bad_request("streaming built-in tool continuation is not supported; set stream=false",
+                    "stream", "builtin_tools_streaming_not_supported");
+    }
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);
     parse_reasoning_effort(body, output.generation);

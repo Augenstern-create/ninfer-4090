@@ -85,6 +85,10 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] [--auto-long-anchors N] "
            "[--request-log-jsonl FILE] [--slot-save-path DIR] [--auto-save-evicted] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
+           "[--enable-builtin-web-tools --searxng-url URL] "
+           "[--web-search-timeout-ms N] [--web-search-max-results N] "
+           "[--web-open-max-bytes N] [--max-builtin-tool-rounds N] "
+           "[--web-allow-private-network] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -123,6 +127,9 @@ std::string serve_usage_text(const char* argv0) {
            "       --model-id overrides the artifact identity.model_id reported by the server\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
+           "       built-in Web tools are disabled by default; enabling them requires a "
+           "SearXNG JSON endpoint. web_open rejects private, loopback and link-local addresses "
+           "unless --web-allow-private-network is explicitly set\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --vision-max-tokens sets the Vision scratchpad token capacity (default 8192)\n"
@@ -301,6 +308,28 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--response-store-max-mib is out of range");
             }
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--enable-builtin-web-tools") {
+            options.builtin_web.enabled = true;
+        } else if (arg == "--searxng-url") {
+            options.builtin_web.searxng_url = require_value("--searxng-url");
+            if (options.builtin_web.searxng_url.empty()) {
+                throw std::invalid_argument("--searxng-url must not be empty");
+            }
+        } else if (arg == "--web-search-timeout-ms") {
+            options.builtin_web.search_timeout_ms =
+                static_cast<std::uint32_t>(parse_nonnegative_int(
+                    require_value("--web-search-timeout-ms"), "web-search-timeout-ms"));
+        } else if (arg == "--web-search-max-results") {
+            options.builtin_web.search_max_results = static_cast<std::size_t>(parse_nonnegative_int(
+                require_value("--web-search-max-results"), "web-search-max-results"));
+        } else if (arg == "--web-open-max-bytes") {
+            options.builtin_web.open_max_bytes = static_cast<std::size_t>(
+                parse_u64(require_value("--web-open-max-bytes"), "web-open-max-bytes"));
+        } else if (arg == "--max-builtin-tool-rounds") {
+            options.builtin_web.max_tool_rounds = static_cast<std::uint32_t>(parse_nonnegative_int(
+                require_value("--max-builtin-tool-rounds"), "max-builtin-tool-rounds"));
+        } else if (arg == "--web-allow-private-network") {
+            options.builtin_web.allow_private_network = true;
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
@@ -326,9 +355,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--vision-max-tokens" || arg == "--vision-limit") {
             const int val = parse_nonnegative_int(require_value(arg.c_str()), "vision-max-tokens");
-            if (val <= 0) {
-                throw std::invalid_argument(std::string(arg) + " must be positive");
-            }
+            if (val <= 0) { throw std::invalid_argument(std::string(arg) + " must be positive"); }
             options.vision_max_tokens = static_cast<std::uint32_t>(val);
             options.enable_vision     = true;
         } else if (arg == "--no-cuda-graph") {
@@ -407,6 +434,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (options.max_request_bytes == 0) {
         throw std::invalid_argument("--max-request-mib must be positive");
+    }
+    if (options.builtin_web.enabled && options.builtin_web.searxng_url.empty()) {
+        throw std::invalid_argument("--enable-builtin-web-tools requires --searxng-url");
+    }
+    if (options.builtin_web.search_timeout_ms == 0 || options.builtin_web.search_max_results == 0 ||
+        options.builtin_web.open_max_bytes == 0 || options.builtin_web.max_tool_rounds == 0) {
+        throw std::invalid_argument("built-in Web tool limits must be positive");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");

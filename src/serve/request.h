@@ -44,7 +44,8 @@ private:
 
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
-    int default_max_tokens = 8192;
+    int default_max_tokens         = 8192;
+    bool builtin_web_tools_enabled = false;
 };
 
 enum class ContentKind {
@@ -76,12 +77,18 @@ struct ContentPart {
     std::optional<CacheBoundary> cache_boundary_after;
 };
 
+enum class ToolExecution : std::uint8_t {
+    External,
+    Builtin,
+};
+
 struct ToolDefinition {
     std::string name;
     std::string description;
     std::string input_schema_json;
     std::optional<std::string> input_examples_json;
     std::optional<CacheBoundary> cache_boundary_after;
+    ToolExecution execution = ToolExecution::External;
 };
 
 struct ToolCall {

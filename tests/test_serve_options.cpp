@@ -36,23 +36,42 @@ int main() {
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
-    failures += check(defaults.slot_save_path.empty(),
-                      "slot persistence is not disabled by default");
+    failures +=
+        check(defaults.slot_save_path.empty(), "slot persistence is not disabled by default");
     failures += check(!defaults.deprecated_turn_checkpoints_given,
                       "--turn-checkpoints is not reported when it was never passed");
+    failures += check(!defaults.builtin_web.enabled && defaults.builtin_web.max_tool_rounds == 4 &&
+                          defaults.builtin_web.open_max_bytes == (1ULL << 20),
+                      "built-in Web tools are not safely disabled by default");
+    bool missing_searxng_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--enable-builtin-web-tools"});
+    } catch (const std::invalid_argument&) { missing_searxng_rejected = true; }
+    failures +=
+        check(missing_searxng_rejected, "enabled built-in Web tools accepted no SearXNG endpoint");
+    const ServeOptions web =
+        parse({"ninfer-serve", "model.ninfer", "--enable-builtin-web-tools", "--searxng-url",
+               "http://127.0.0.1:8081", "--web-search-timeout-ms", "2500",
+               "--web-search-max-results", "7", "--web-open-max-bytes", "12345",
+               "--max-builtin-tool-rounds", "3", "--web-allow-private-network"});
+    failures += check(
+        web.builtin_web.enabled && web.builtin_web.allow_private_network &&
+            web.builtin_web.searxng_url == "http://127.0.0.1:8081" &&
+            web.builtin_web.search_timeout_ms == 2500 && web.builtin_web.search_max_results == 7 &&
+            web.builtin_web.open_max_bytes == 12345 && web.builtin_web.max_tool_rounds == 3,
+        "built-in Web CLI options were not preserved");
 
     // --turn-checkpoints is retired. It stays accepted because the deployed container line
     // passes it and an unknown argument is fatal, but it must configure nothing.
-    const ServeOptions ring =
-        parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints", "8"});
+    const ServeOptions ring = parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints", "8"});
     failures += check(ring.turn_checkpoint_ring == 0 && ring.deprecated_turn_checkpoints_given,
                       "retired --turn-checkpoints is accepted, ignored and reported");
     bool missing_ring_value_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--turn-checkpoints"});
     } catch (const std::invalid_argument&) { missing_ring_value_rejected = true; }
-    failures += check(missing_ring_value_rejected,
-                      "retired --turn-checkpoints still requires its value");
+    failures +=
+        check(missing_ring_value_rejected, "retired --turn-checkpoints still requires its value");
     failures += check(!ring.auto_save_evicted, "auto-save-evicted is not disabled by default");
 
     // --auto-long-anchors: unset by default so it can follow the resolved anchor cap.
@@ -86,24 +105,21 @@ int main() {
         disabled.enabled = false;
         failures += check(resolve_automatic_private_anchors(defaults, disabled) == 0U,
                           "a disabled context cache still proposes automatic anchors");
-        const ServeOptions no_reuse =
-            parse({"ninfer-serve", "model.ninfer", "--no-prefix-reuse"});
+        const ServeOptions no_reuse = parse({"ninfer-serve", "model.ninfer", "--no-prefix-reuse"});
         failures += check(no_reuse.auto_long_anchors == 0U &&
                               resolve_automatic_private_anchors(no_reuse, resolved) == 0U,
                           "--no-prefix-reuse did not disable automatic anchors");
     }
 
-    const ServeOptions auto_save = parse({"ninfer-serve", "model.ninfer", "--slot-save-path",
-                                          "/tmp/slots", "--auto-save-evicted"});
+    const ServeOptions auto_save = parse(
+        {"ninfer-serve", "model.ninfer", "--slot-save-path", "/tmp/slots", "--auto-save-evicted"});
     failures += check(auto_save.auto_save_evicted, "--auto-save-evicted was not applied");
     bool auto_save_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--auto-save-evicted"});
-    } catch (const std::invalid_argument&) {
-        auto_save_rejected = true;
-    }
-    failures += check(auto_save_rejected,
-                      "--auto-save-evicted without --slot-save-path was not rejected");
+    } catch (const std::invalid_argument&) { auto_save_rejected = true; }
+    failures +=
+        check(auto_save_rejected, "--auto-save-evicted without --slot-save-path was not rejected");
     failures += check(defaults.context_cost_presets.empty(),
                       "external context-cost presets are unexpectedly configured by default");
     failures += check(defaults.log_stats_interval_ms == 5000,
@@ -136,25 +152,19 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
-    const ServeOptions rotor =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
-    failures += check(
-        rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
-        "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
+    const ServeOptions rotor = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
+    failures += check(rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+                      "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
     failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
                       "rk8v4 unexpectedly changed the default KV storage");
 
-    const ServeOptions k4e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
-    failures += check(
-        k4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
-        "--kv-dtype rk4v4-e8 did not select RK4V4E8 storage");
+    const ServeOptions k4e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4-e8"});
+    failures += check(k4e8.kv_cache == ninfer::KvCacheStorage::RK4V4E8,
+                      "--kv-dtype rk4v4-e8 did not select RK4V4E8 storage");
 
-    const ServeOptions k2e8 =
-        parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
-    failures += check(
-        k2e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8,
-        "--kv-dtype rk2v4-e8 did not select RK2V4E8 storage");
+    const ServeOptions k2e8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk2v4-e8"});
+    failures += check(k2e8.kv_cache == ninfer::KvCacheStorage::RK2V4E8,
+                      "--kv-dtype rk2v4-e8 did not select RK2V4E8 storage");
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");

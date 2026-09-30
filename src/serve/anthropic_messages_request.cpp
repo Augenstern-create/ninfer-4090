@@ -1,4 +1,5 @@
 #include "serve/anthropic_messages.h"
+#include "serve/builtin_tools.h"
 #include "serve/request_validation.h"
 
 #include <algorithm>
@@ -777,7 +778,7 @@ std::vector<ParsedTool> parse_tool_definitions(const Json& body) {
     return result;
 }
 
-void lower_tools(const Json& body, GenerationRequest& request) {
+void lower_tools(const Json& body, GenerationRequest& request, const RequestLimits& limits) {
     const ToolSelection selection       = parse_tool_choice(body);
     std::vector<ParsedTool> definitions = parse_tool_definitions(body);
     const auto named                    = [&](const ParsedTool& tool) {
@@ -837,6 +838,10 @@ void lower_tools(const Json& body, GenerationRequest& request) {
             bad_request("tool allowed_callers excludes direct model calls, and NInfer provides no "
                         "alternate caller",
                         "tools", "tool_caller_not_supported");
+        }
+        if (limits.builtin_web_tools_enabled && (tool.definition.name == kWebSearchToolName ||
+                                                 tool.definition.name == kWebOpenToolName)) {
+            tool.definition.execution = ToolExecution::Builtin;
         }
         request.tools.push_back(std::move(tool.definition));
     }
@@ -1016,8 +1021,8 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
 }
 
 void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurpose purpose,
-                         int effective_max_tokens) {
-    lower_tools(body, request);
+                         int effective_max_tokens, const RequestLimits& limits) {
+    lower_tools(body, request, limits);
     parse_system(body, request);
     parse_messages(body, request);
     parse_thinking(body, request, purpose, effective_max_tokens);
@@ -1061,18 +1066,26 @@ AnthropicMessagesRequest parse_anthropic_messages_request(const Json& body,
     }
 
     parse_common_prompt(body, result.generation, ParsePurpose::Messages,
-                        result.generation.max_tokens);
+                        result.generation.max_tokens, limits);
     parse_generation_fields(body, result.generation);
+    if (result.stream && result.generation.uses_tools() &&
+        std::any_of(
+            result.generation.tools.begin(), result.generation.tools.end(),
+            [](const ToolDefinition& tool) { return tool.execution == ToolExecution::Builtin; })) {
+        bad_request("streaming built-in tool continuation is not supported; set stream=false",
+                    "stream", "builtin_tools_streaming_not_supported");
+    }
     return result;
 }
 
-AnthropicCountTokensRequest parse_anthropic_count_tokens_request(const Json& body) {
+AnthropicCountTokensRequest parse_anthropic_count_tokens_request(const Json& body,
+                                                                 const RequestLimits& limits) {
     require_object(body);
     AnthropicCountTokensRequest result;
     result.model                           = parse_model(body);
     result.generation.tool_name_max_length = kMaxToolNameLength;
     parse_common_prompt(body, result.generation, ParsePurpose::CountTokens,
-                        std::numeric_limits<int>::max());
+                        std::numeric_limits<int>::max(), limits);
     return result;
 }
 

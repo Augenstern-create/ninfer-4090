@@ -519,9 +519,9 @@ int test_tools_and_effective_subset() {
         {"input", "time"},
         {"tools", Json::array({weather, clock})},
         {"tool_choice",
-            Json{{"type", "allowed_tools"},
-                 {"mode", "auto"},
-                 {"tools", Json::array({Json{{"type", "function"}, {"name", "clock"}}})}}}};
+         Json{{"type", "allowed_tools"},
+              {"mode", "auto"},
+              {"tools", Json::array({Json{{"type", "function"}, {"name", "clock"}}})}}}};
     const OpenAIResponsesCreateRequest request =
         parse_openai_responses_create_request(body, limits());
     int failures = 0;
@@ -704,10 +704,54 @@ int test_namespace_tools() {
         Json::array({Json{{"type", "namespace"},
                           {"name", std::string(60, 'n')},
                           {"tools", Json::array({Json{{"type", "function"}, {"name", "tool"}}})}}});
+    const OpenAIResponsesCreateRequest oversized_request =
+        parse_openai_responses_create_request(oversized, limits());
+    const std::string alias = oversized_request.prompt.generation.tools[0].name;
+    failures += check(alias.size() <= 64 && alias != std::string(60, 'n') + "__tool" &&
+                          oversized_request.tool_identities.at(alias).wire_namespace ==
+                              std::string(60, 'n'),
+                      "long flattened identities receive a stable reversible Engine alias");
+    GenerationOutcome oversized_outcome;
+    oversized_outcome.tool_calls.push_back(
+        ninfer::GeneratedToolCall{.name = alias, .arguments_json = "{}"});
+    const Json oversized_output =
+        make_openai_response_object("resp_long", 1, oversized_request, {}, oversized_outcome)
+            .body.at("output")
+            .at(0);
+    failures += check(oversized_output.at("namespace") == std::string(60, 'n') &&
+                          oversized_output.at("name") == "tool",
+                      "long alias restores the original wire namespace and name");
+    Json alias_collision = oversized;
+    alias_collision["tools"].push_back(Json{{"type", "function"}, {"name", alias}});
     failures += check(api_code([&] {
-                          (void)parse_openai_responses_create_request(oversized, limits());
-                      }) == "invalid_tool_name",
-                      "flattened identities must fit the Engine tool-name contract");
+                          (void)parse_openai_responses_create_request(alias_collision, limits());
+                      }) == "duplicate_tool_name",
+                      "stable alias collisions are detected explicitly");
+    return failures;
+}
+
+int test_builtin_web_declaration() {
+    Json body                         = {{"model", "m"},
+                                         {"input", "search"},
+                                         {"tools", Json::array({Json{{"type", "web_search"}}})}};
+    int failures                      = check(api_code([&] {
+                             (void)parse_openai_responses_create_request(body, limits());
+                                              }) == "tool_type_not_supported",
+                                              "Responses web_search remains disabled by default");
+    RequestLimits enabled             = limits();
+    enabled.builtin_web_tools_enabled = true;
+    const OpenAIResponsesCreateRequest request =
+        parse_openai_responses_create_request(body, enabled);
+    failures += check(request.tools.size() == 1 && request.tools[0].at("type") == "web_search" &&
+                          request.prompt.generation.tools.size() == 2 &&
+                          request.prompt.generation.tools[0].execution == ToolExecution::Builtin &&
+                          request.prompt.generation.tools[1].execution == ToolExecution::Builtin,
+                      "Responses hosted declaration maps to both built-in Web functions");
+    body["stream"] = true;
+    failures += check(api_code([&] {
+                          (void)parse_openai_responses_create_request(body, enabled);
+                      }) == "builtin_tools_streaming_not_supported",
+                      "Responses streaming built-in loop is rejected precisely");
     return failures;
 }
 
@@ -992,6 +1036,7 @@ int main() {
     failures += test_assistant_item_boundaries_and_errors();
     failures += test_tools_and_effective_subset();
     failures += test_namespace_tools();
+    failures += test_builtin_web_declaration();
     failures += test_explicit_rejections();
     failures += test_previous_response_call_graph();
     failures += test_response_object();

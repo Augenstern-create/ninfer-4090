@@ -8,6 +8,7 @@ class logger;
 }
 
 #include "ninfer/engine.h"
+#include "serve/builtin_tools.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
 
@@ -52,6 +53,9 @@ struct GenerationOutcome {
     std::string text;
     std::string reasoning;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
+    // Server-executed assistant calls and their tool-result turns. Protocol encoders expose only
+    // the terminal outcome, while stateful adapters retain this history for continuation.
+    std::vector<ChatTurn> builtin_history;
     ninfer::ToolCallParseDiagnostics tool_call_parse;
     int prompt_tokens     = 0;
     int completion_tokens = 0;
@@ -176,6 +180,17 @@ public:
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
                           std::function<bool()> is_cancelled = {});
 
+    // Aggregate-only server-side tool loop. Each continuation is a fresh public Engine request
+    // built from protocol-neutral history; `prepared` is replaced with the final round so its
+    // lifetime can remain attached to the HTTP response.
+    GenerationOutcome
+    run_with_builtin_tools(GenerationRequest request, PreparedRequest& prepared,
+                           std::optional<std::size_t> max_tool_calls = std::nullopt,
+                           std::function<bool()> is_cancelled        = {},
+                           ContextCacheHints context_cache           = {});
+
+    [[nodiscard]] bool builtin_tools_enabled() const noexcept { return builtin_tools_.enabled(); }
+
     void warmup();
 
 private:
@@ -203,6 +218,7 @@ private:
     std::uint32_t automatic_private_anchors_ = 0;
     ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
+    BuiltinToolRegistry builtin_tools_;
 };
 
 } // namespace ninfer::serve

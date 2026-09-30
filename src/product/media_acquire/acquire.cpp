@@ -3,12 +3,12 @@
 #include <curl/curl.h>
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#    include <winsock2.h>
+#    include <ws2tcpip.h>
 #else
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
+#    include <arpa/inet.h>
+#    include <netdb.h>
+#    include <sys/socket.h>
 #endif
 
 #include <algorithm>
@@ -219,7 +219,7 @@ std::size_t curl_write(char* data, std::size_t size, std::size_t count, void* op
     return amount;
 }
 
-std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
+HttpResponse fetch_url(std::string url, const Policy& policy) {
     if (!policy.allow_remote) { throw std::invalid_argument("remote media URLs are disabled"); }
     static std::once_flag init;
     std::call_once(init, [] {
@@ -281,7 +281,12 @@ std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
         curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
         if (status >= 200 && status < 300) {
             check_control(policy);
-            return buffer.bytes;
+            char* content_type = nullptr;
+            curl_easy_getinfo(curl.get(), CURLINFO_CONTENT_TYPE, &content_type);
+            return HttpResponse{.bytes        = std::move(buffer.bytes),
+                                .content_type = content_type == nullptr ? "" : content_type,
+                                .final_url    = std::move(url),
+                                .status       = status};
         }
         if (status < 300 || status >= 400 || redirect == policy.max_redirects) {
             throw Error(ErrorKind::RemoteUnavailable,
@@ -338,6 +343,15 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
 
 } // namespace
 
+HttpResponse acquire_http(std::string url, const Policy& policy) {
+    if (policy.max_bytes == 0) { throw std::invalid_argument("HTTP byte limit must be positive"); }
+    check_control(policy);
+    if (url.empty()) { throw std::invalid_argument("HTTP URL is empty"); }
+    HttpResponse response = fetch_url(std::move(url), policy);
+    if (response.bytes.empty()) { throw std::invalid_argument("HTTP response contains no data"); }
+    return response;
+}
+
 std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& policy) {
     if (policy.max_bytes == 0) { throw std::invalid_argument("media byte limit must be positive"); }
     check_control(policy);
@@ -352,11 +366,7 @@ std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& poli
     }
     if (source.value.empty()) { throw std::invalid_argument("media source is empty"); }
 
-    if (source.kind == SourceKind::Url) {
-        std::vector<std::uint8_t> bytes = fetch_url(source.value, policy);
-        if (bytes.empty()) { throw std::invalid_argument("media source contains no data"); }
-        return bytes;
-    }
+    if (source.kind == SourceKind::Url) { return acquire_http(source.value, policy).bytes; }
     if (source.kind == SourceKind::Data) {
         const std::size_t comma = source.value.find(',');
         if (!source.value.starts_with("data:") || comma == std::string::npos ||

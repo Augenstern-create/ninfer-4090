@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,8 +19,11 @@ void HttpServer::handle_count_tokens(const httplib::Request& req, httplib::Respo
     const std::string request_id = new_anthropic_request_id();
     res.set_header("request-id", request_id);
     try {
+        RequestLimits limits;
+        limits.default_max_tokens        = options_.default_max_tokens;
+        limits.builtin_web_tools_enabled = options_.builtin_web.enabled;
         const AnthropicCountTokensRequest request =
-            parse_anthropic_count_tokens_request(parse_json_body(req));
+            parse_anthropic_count_tokens_request(parse_json_body(req), limits);
         const int input_tokens = service_->count_prompt_tokens(
             request.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_anthropic_count_tokens_response(input_tokens), "application/json");
@@ -43,8 +47,9 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
     AnthropicMessagesRequest request;
     try {
         RequestLimits limits;
-        limits.default_max_tokens = options_.default_max_tokens;
-        request                   = parse_anthropic_messages_request(parse_json_body(req), limits);
+        limits.default_max_tokens        = options_.default_max_tokens;
+        limits.builtin_web_tools_enabled = options_.builtin_web.enabled;
+        request = parse_anthropic_messages_request(parse_json_body(req), limits);
     } catch (const ApiException& exception) {
         write_anthropic_error(res, exception.error(), request_id);
         return;
@@ -96,7 +101,8 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
     if (!request.stream) {
         GenerationOutcome outcome;
         try {
-            outcome = service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
+            outcome = service_->run_with_builtin_tools(request.generation, prepared, std::nullopt,
+                                                       [&req] { return client_disconnected(req); });
         } catch (const ApiException& exception) {
             const ApiError error = normalize_anthropic_error(exception.error());
             lifecycle->failure(make_generation_request_failure(error));

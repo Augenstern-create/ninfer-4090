@@ -235,19 +235,19 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
                                      std::shared_ptr<spdlog::logger> logger)
     : options_(std::move(options)), logger_(std::move(logger)) {
     ninfer::EngineOptions engine_options;
-    engine_options.artifact_path            = options_.artifact_path;
-    engine_options.device                   = options_.device;
-    engine_options.max_context              = options_.max_context;
-    engine_options.kv_capacity              = options_.kv_capacity;
-    engine_options.max_concurrency          = options_.max_concurrency;
-    engine_options.max_pending_requests     = options_.max_pending_requests;
-    engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
-    engine_options.prefill_chunk            = options_.prefill_chunk;
-    engine_options.turn_checkpoint_ring     = options_.turn_checkpoint_ring;
-    engine_options.auto_save_evicted        = options_.auto_save_evicted;
+    engine_options.artifact_path        = options_.artifact_path;
+    engine_options.device               = options_.device;
+    engine_options.max_context          = options_.max_context;
+    engine_options.kv_capacity          = options_.kv_capacity;
+    engine_options.max_concurrency      = options_.max_concurrency;
+    engine_options.max_pending_requests = options_.max_pending_requests;
+    engine_options.pending_timeout_ms   = options_.pending_timeout_ms;
+    engine_options.prefill_chunk        = options_.prefill_chunk;
+    engine_options.turn_checkpoint_ring = options_.turn_checkpoint_ring;
+    engine_options.auto_save_evicted    = options_.auto_save_evicted;
     if (options_.auto_save_evicted) {
-        engine_options.auto_save_listener = [logger = logger_](
-                                                const ninfer::SlotAutoSaveEvent& event) {
+        engine_options.auto_save_listener = [logger =
+                                                 logger_](const ninfer::SlotAutoSaveEvent& event) {
             if (!logger) { return; }
             if (event.skipped_behind_tokens) {
                 logger->info("{}", "slot auto-save SKIPPED file=" + event.path +
@@ -259,8 +259,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
                                        " n_saved=" + std::to_string(event.tokens) +
                                        " bytes=" + std::to_string(event.bytes));
             } else {
-                logger->warn("{}",
-                             "slot auto-save FAILED file=" + event.path + ": " + event.error);
+                logger->warn("{}", "slot auto-save FAILED file=" + event.path + ": " + event.error);
             }
         };
     }
@@ -279,8 +278,9 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     prompt_capabilities_ = engine_->prompt_capabilities();
     automatic_private_anchors_ =
         resolve_automatic_private_anchors(options_, engine_->options().context_cache);
-    request_capacity_    = std::make_shared<RequestCapacity>(
+    request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+    builtin_tools_ = BuiltinToolRegistry(options_.builtin_web);
 }
 
 std::shared_ptr<RequestLifetime>
@@ -488,6 +488,23 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
     return outcome;
+}
+
+GenerationOutcome GenerationService::run_with_builtin_tools(
+    GenerationRequest request, PreparedRequest& prepared, std::optional<std::size_t> max_tool_calls,
+    std::function<bool()> is_cancelled, ContextCacheHints context_cache) {
+    GenerationOutcome first = run(prepared, nullptr, is_cancelled);
+    ToolOrchestrator orchestrator(builtin_tools_);
+    BuiltinToolControl control{.is_cancelled = is_cancelled};
+    return orchestrator.run(std::move(request), std::move(first), max_tool_calls, control,
+                            [&](const GenerationRequest& continuation) {
+                                PreparedRequest next =
+                                    prepare(continuation, GenerationConsumerMode::Aggregate, {},
+                                            is_cancelled, context_cache);
+                                GenerationOutcome outcome = run(next, nullptr, is_cancelled);
+                                prepared                  = std::move(next);
+                                return outcome;
+                            });
 }
 
 void GenerationService::warmup() {
