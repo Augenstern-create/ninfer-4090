@@ -57,6 +57,8 @@ struct GenerationOutcome {
     // the terminal outcome, while stateful adapters retain this history for continuation.
     std::vector<ChatTurn> builtin_history;
     ninfer::ToolCallParseDiagnostics tool_call_parse;
+    // Built-in continuations sum token usage from every Engine generation. Metrics below describe
+    // the terminal generation round as one coherent observation; they are never partially summed.
     int prompt_tokens     = 0;
     int completion_tokens = 0;
     int reasoning_tokens  = 0;

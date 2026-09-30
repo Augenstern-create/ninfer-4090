@@ -8,6 +8,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -84,6 +86,16 @@ ChatTurn call_turn(std::initializer_list<std::pair<const char*, const char*>> ca
         turn.tool_calls.push_back(
             ToolCall{.id = id, .name = name, .arguments_json = R"({"value":1})"});
     }
+    return turn;
+}
+
+ChatTurn result_turn(std::string id, std::string name, std::string output) {
+    ChatTurn turn;
+    turn.role             = ninfer::ChatRole::Tool;
+    turn.tool_call_id     = std::move(id);
+    turn.tool_result_name = std::move(name);
+    turn.content.push_back(ContentPart{
+        .kind = ContentKind::Text, .text = std::move(output), .type_raw = "text"});
     return turn;
 }
 
@@ -707,10 +719,18 @@ int test_namespace_tools() {
     const OpenAIResponsesCreateRequest oversized_request =
         parse_openai_responses_create_request(oversized, limits());
     const std::string alias = oversized_request.prompt.generation.tools[0].name;
-    failures += check(alias.size() <= 64 && alias != std::string(60, 'n') + "__tool" &&
+    const OpenAIResponsesCreateRequest oversized_repeat =
+        parse_openai_responses_create_request(oversized, limits());
+    const bool alias_characters =
+        std::all_of(alias.begin(), alias.end(), [](unsigned char value) {
+            return std::isalnum(value) || value == '_' || value == '-';
+        });
+    failures += check(alias.size() <= 64 && alias_characters &&
+                          oversized_repeat.prompt.generation.tools[0].name == alias &&
+                          alias != std::string(60, 'n') + "__tool" &&
                           oversized_request.tool_identities.at(alias).wire_namespace ==
                               std::string(60, 'n'),
-                      "long flattened identities receive a stable reversible Engine alias");
+                      "long flattened identities receive a legal stable reversible Engine alias");
     GenerationOutcome oversized_outcome;
     oversized_outcome.tool_calls.push_back(
         ninfer::GeneratedToolCall{.name = alias, .arguments_json = "{}"});
@@ -721,6 +741,21 @@ int test_namespace_tools() {
     failures += check(oversized_output.at("namespace") == std::string(60, 'n') &&
                           oversized_output.at("name") == "tool",
                       "long alias restores the original wire namespace and name");
+    const OpenAIResponsesCreateRequest oversized_replay = parse_openai_responses_create_request(
+        Json{{"model", "m"},
+             {"input", Json::array({oversized_output,
+                                     Json{{"type", "function_call_output"},
+                                          {"call_id", oversized_output.at("call_id")},
+                                          {"namespace", std::string(60, 'n')},
+                                          {"name", "tool"},
+                                          {"output", "done"}}})}},
+        limits());
+    OpenAIResponsesStore alias_store(8, 1ULL << 20);
+    const OpenAIResponsesResolvedPrompt oversized_resolved = resolve_openai_responses_prompt(
+        oversized_replay.prompt, alias_store, "resp_long_replay", true);
+    failures += check(oversized_resolved.generation.messages[0].tool_calls[0].name == alias &&
+                          oversized_resolved.generation.messages[1].tool_result_name == alias,
+                      "long namespace call and output round-trip through the Engine alias");
     Json alias_collision = oversized;
     alias_collision["tools"].push_back(Json{{"type", "function"}, {"name", alias}});
     failures += check(api_code([&] {
@@ -878,6 +913,38 @@ int test_previous_response_call_graph() {
                       }) == "response_not_found",
                       "missing parent response is reported precisely");
     return failures;
+}
+
+int test_stored_builtin_then_external_call_graph() {
+    OpenAIResponsesStore store(8, 1ULL << 20);
+    const OpenAIResponseContext context = append_openai_response_context(
+        {}, {text_turn(ninfer::ChatRole::User, "research"),
+             call_turn({{"builtin_search", "web_search"}}),
+             result_turn("builtin_search", "web_search", "search results"),
+             call_turn({{"builtin_open", "web_open"}}),
+             result_turn("builtin_open", "web_open", "page text"),
+             call_turn({{"external_call", "mcp_lookup"}})});
+    store.put(stored_parent(context));
+
+    const OpenAIResponsesCreateRequest child = parse_openai_responses_create_request(
+        Json{{"model", "m"},
+             {"store", true},
+             {"previous_response_id", "resp_parent"},
+             {"input", Json::array({Json{{"type", "function_call_output"},
+                                          {"call_id", "external_call"},
+                                          {"output", "external result"}}})}},
+        limits());
+    const OpenAIResponsesResolvedPrompt resolved =
+        resolve_openai_responses_prompt(child.prompt, store, "resp_child", true);
+    return check(resolved.generation.messages.size() == 7 &&
+                     resolved.generation.messages[1].tool_calls[0].name == "web_search" &&
+                     resolved.generation.messages[2].tool_result_name == "web_search" &&
+                     resolved.generation.messages[3].tool_calls[0].name == "web_open" &&
+                     resolved.generation.messages[4].tool_result_name == "web_open" &&
+                     resolved.generation.messages[5].tool_calls[0].name == "mcp_lookup" &&
+                     resolved.generation.messages[6].tool_call_id == "external_call" &&
+                     resolved.session_key == "responses-session",
+                 "stored built-in continuation preserves an external call/output graph");
 }
 
 int test_response_object() {
@@ -1039,6 +1106,7 @@ int main() {
     failures += test_builtin_web_declaration();
     failures += test_explicit_rejections();
     failures += test_previous_response_call_graph();
+    failures += test_stored_builtin_then_external_call_graph();
     failures += test_response_object();
     failures += test_sse_sequence_and_failures();
     failures += test_input_tokens_uses_shared_state_path();

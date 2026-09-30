@@ -41,8 +41,12 @@ int main() {
     failures += check(!defaults.deprecated_turn_checkpoints_given,
                       "--turn-checkpoints is not reported when it was never passed");
     failures += check(!defaults.builtin_web.enabled && defaults.builtin_web.max_tool_rounds == 4 &&
+                          defaults.builtin_web.open_timeout_ms == 10'000 &&
                           defaults.builtin_web.open_max_bytes == (1ULL << 20),
                       "built-in Web tools are not safely disabled by default");
+    failures += check(serve_usage_text("ninfer-serve").find("--web-open-timeout-ms") !=
+                          std::string::npos,
+                      "built-in Web open timeout is missing from --help");
     bool missing_searxng_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--enable-builtin-web-tools"});
@@ -52,14 +56,23 @@ int main() {
     const ServeOptions web =
         parse({"ninfer-serve", "model.ninfer", "--enable-builtin-web-tools", "--searxng-url",
                "http://127.0.0.1:8081", "--web-search-timeout-ms", "2500",
+               "--web-open-timeout-ms", "3500",
                "--web-search-max-results", "7", "--web-open-max-bytes", "12345",
                "--max-builtin-tool-rounds", "3", "--web-allow-private-network"});
     failures += check(
         web.builtin_web.enabled && web.builtin_web.allow_private_network &&
             web.builtin_web.searxng_url == "http://127.0.0.1:8081" &&
-            web.builtin_web.search_timeout_ms == 2500 && web.builtin_web.search_max_results == 7 &&
+            web.builtin_web.search_timeout_ms == 2500 && web.builtin_web.open_timeout_ms == 3500 &&
+            web.builtin_web.search_max_results == 7 &&
             web.builtin_web.open_max_bytes == 12345 && web.builtin_web.max_tool_rounds == 3,
         "built-in Web CLI options were not preserved");
+    bool zero_open_timeout_rejected = false;
+    try {
+        (void)parse(
+            {"ninfer-serve", "model.ninfer", "--web-open-timeout-ms", "0"});
+    } catch (const std::invalid_argument&) { zero_open_timeout_rejected = true; }
+    failures += check(zero_open_timeout_rejected,
+                      "--web-open-timeout-ms accepted a non-positive value");
 
     // --turn-checkpoints is retired. It stays accepted because the deployed container line
     // passes it and an unknown argument is fatal, but it must configure nothing.

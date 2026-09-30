@@ -2,6 +2,7 @@
 #include "serve/generation_service.h"
 
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -70,6 +71,10 @@ GenerationOutcome call(std::string name = "builtin") {
     GenerationOutcome outcome;
     outcome.prompt_tokens     = 2;
     outcome.completion_tokens = 1;
+    outcome.reasoning_tokens  = 1;
+    outcome.metrics.total_seconds           = 10.0;
+    outcome.metrics.prefix_cache_hit_tokens = 7;
+    outcome.metrics.speculative_rounds      = 11;
     outcome.tool_calls.push_back(
         ninfer::GeneratedToolCall{.name = std::move(name), .arguments_json = R"({"x":1})"});
     return outcome;
@@ -129,20 +134,35 @@ int test_orchestration() {
     GenerationOutcome result = orchestrator.run(
         request, call(), std::nullopt, {}, [&](const GenerationRequest& continuation) {
             ++generated;
+            failures +=
+                check(continuation.messages.size() == static_cast<std::size_t>(generated * 2) &&
+                          continuation.messages[0].role == ninfer::ChatRole::Assistant &&
+                          continuation.messages[1].role == ninfer::ChatRole::Tool,
+                      "built-in call and result enter continuation history");
+            if (generated == 1) {
+                GenerationOutcome next = call();
+                next.prompt_tokens      = 3;
+                next.completion_tokens  = 2;
+                return next;
+            }
             GenerationOutcome final;
-            final.text              = "done";
-            final.prompt_tokens     = 4;
-            final.completion_tokens = 2;
-            failures += check(continuation.messages.size() == 2 &&
-                                  continuation.messages[0].role == ninfer::ChatRole::Assistant &&
-                                  continuation.messages[1].role == ninfer::ChatRole::Tool,
-                              "built-in call and result enter continuation history");
+            final.text                            = "done";
+            final.prompt_tokens                   = 4;
+            final.completion_tokens               = 2;
+            final.reasoning_tokens                = 1;
+            final.metrics.total_seconds           = 20.0;
+            final.metrics.prefix_cache_hit_tokens = 3;
+            final.metrics.speculative_rounds      = 5;
             return final;
         });
-    failures += check(*calls == 1 && generated == 1 && result.text == "done" &&
-                          result.builtin_history.size() == 2 && result.prompt_tokens == 6 &&
-                          result.completion_tokens == 3,
-                      "built-in call executes and a second generation completes");
+    failures += check(*calls == 2 && generated == 2 && result.text == "done" &&
+                          result.builtin_history.size() == 4 && result.prompt_tokens == 9 &&
+                          result.completion_tokens == 5 && result.reasoning_tokens == 3,
+                      "multi-round built-in continuation accumulates all token usage");
+    failures += check(result.metrics.total_seconds == 20.0 &&
+                          result.metrics.prefix_cache_hit_tokens == 3 &&
+                          result.metrics.speculative_rounds == 5,
+                      "continuation metrics consistently describe only the terminal round");
 
     *calls                     = 0;
     GenerationOutcome external = call("external");
@@ -155,16 +175,34 @@ int test_orchestration() {
                           result.tool_calls[0].name == "external",
                       "external tool calls are not intercepted");
 
+    *calls = 0;
+    result = orchestrator.run(request, call(), std::nullopt, {},
+                              [&](const GenerationRequest& continuation) {
+                                  failures += check(continuation.messages.size() == 2,
+                                                    "built-in history precedes external call");
+                                  return call("external");
+                              });
+    failures += check(*calls == 1 && result.tool_calls.size() == 1 &&
+                          result.tool_calls[0].name == "external" &&
+                          result.builtin_history.size() == 2 && result.prompt_tokens == 4 &&
+                          result.completion_tokens == 2 && result.reasoning_tokens == 2,
+                      "external call after a completed built-in round retains coherent history");
+
     *calls                  = 0;
     GenerationOutcome mixed = call();
     mixed.tool_calls.push_back(
         ninfer::GeneratedToolCall{.name = "external", .arguments_json = "{}"});
-    result = orchestrator.run(request, std::move(mixed), std::nullopt, {},
-                              [&](const GenerationRequest&) { return GenerationOutcome{}; });
-    failures +=
-        check(*calls == 1 && result.tool_calls.size() == 1 &&
-                  result.tool_calls[0].name == "external" && result.builtin_history.size() == 2,
-              "mixed calls execute only the built-in and return the external call");
+    bool mixed_generated = false;
+    failures += check(
+        api_code([&] {
+            (void)orchestrator.run(request, std::move(mixed), std::nullopt, {},
+                                   [&](const GenerationRequest&) {
+                                       mixed_generated = true;
+                                       return GenerationOutcome{};
+                                   });
+        }) == "mixed_builtin_external_tool_calls_not_supported" &&
+            *calls == 0 && !mixed_generated,
+        "mixed built-in and external calls are rejected before any side effect");
 
     BuiltinToolRegistry one_round({tool}, 1);
     ToolOrchestrator bounded(one_round);
@@ -188,7 +226,9 @@ public:
     LocalServer() {
         server_.Get("/html", [](const httplib::Request&, httplib::Response& response) {
             response.set_content(
-                "<html><script>ignore()</script><body>Hello <b>world</b></body></html>",
+                "<html><!-- hidden --><script>ignore()</script><body><h1>Hello &amp; world</h1>"
+                "<p>First<br>Second</p><ul><li>one</li><li>two</li></ul>"
+                "<pre>code  block\nnext</pre></body></html>",
                 "text/html");
         });
         server_.Get("/large", [](const httplib::Request&, httplib::Response& response) {
@@ -221,17 +261,23 @@ int test_web_open() {
     LocalServer server;
     BuiltinWebOptions options;
     options.open_max_bytes        = 1024;
-    options.search_timeout_ms     = 2'000;
+    options.search_timeout_ms     = 1;
+    options.open_timeout_ms       = 2'000;
     options.allow_private_network = true;
     const auto open               = make_web_open_tool(options);
     const std::string result =
         open->execute(std::string("{\"url\":\"") + server.url("/html") + "\"}", {});
-    int failures = check(result.find("Hello world") != std::string::npos &&
-                             result.find("ignore") == std::string::npos,
-                         "web_open converts HTML into readable text");
+    const std::string text = nlohmann::json::parse(result).at("text").get<std::string>();
+    int failures = check(text.find("Hello & world") != std::string::npos &&
+                             text.find("First\nSecond") != std::string::npos &&
+                             text.find("- one") != std::string::npos &&
+                             text.find("code  block\nnext") != std::string::npos &&
+                             text.find("ignore") == std::string::npos &&
+                             text.find("hidden") == std::string::npos,
+                         "web_open performs bounded basic HTML text stripping");
     const std::string redirected =
         open->execute(std::string("{\"url\":\"") + server.url("/redirect") + "\"}", {});
-    failures += check(redirected.find("Hello world") != std::string::npos,
+    failures += check(redirected.find("Hello & world") != std::string::npos,
                       "web_open follows checked HTTP redirects");
 
     options.allow_private_network = false;

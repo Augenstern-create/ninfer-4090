@@ -78,6 +78,10 @@ void replace_all(std::string& text, std::string_view from, std::string_view to) 
 
 std::string html_to_text(std::string_view html) {
     std::string filtered(html);
+    for (std::size_t begin = 0; (begin = filtered.find("<!--", begin)) != std::string::npos;) {
+        const std::size_t end = filtered.find("-->", begin + 4);
+        filtered.erase(begin, end == std::string::npos ? filtered.size() - begin : end + 3 - begin);
+    }
     std::string lower(filtered);
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -95,17 +99,49 @@ std::string html_to_text(std::string_view html) {
     html = filtered;
     std::string out;
     out.reserve(html.size());
-    bool in_tag = false;
-    bool space  = false;
+    bool space        = false;
+    bool preformatted = false;
+    const auto append_break = [&] {
+        while (!out.empty() && out.back() == ' ') { out.pop_back(); }
+        if (!out.empty() && out.back() != '\n') { out.push_back('\n'); }
+        space = false;
+    };
     for (std::size_t i = 0; i < html.size(); ++i) {
         const char c = html[i];
-        if (!in_tag && c == '<') {
-            in_tag = true;
-            space  = true;
+        if (c == '<') {
+            const std::size_t end = html.find('>', i + 1);
+            if (end == std::string_view::npos) { break; }
+            std::string tag(html.substr(i + 1, end - i - 1));
+            std::transform(tag.begin(), tag.end(), tag.begin(), [](unsigned char value) {
+                return static_cast<char>(std::tolower(value));
+            });
+            const std::size_t name_begin = tag.find_first_not_of(" \t\r\n/");
+            const std::size_t name_end = name_begin == std::string::npos
+                                             ? name_begin
+                                             : tag.find_first_of(" \t\r\n/", name_begin);
+            const std::string_view name = name_begin == std::string::npos
+                                              ? std::string_view{}
+                                              : std::string_view(tag).substr(name_begin,
+                                                    name_end == std::string::npos
+                                                        ? std::string::npos
+                                                        : name_end - name_begin);
+            const bool closing = tag.find_first_not_of(" \t\r\n") != std::string::npos &&
+                                 tag[tag.find_first_not_of(" \t\r\n")] == '/';
+            const bool block = name == "br" || name == "p" || name == "div" || name == "li" ||
+                               name == "h1" || name == "h2" || name == "h3" || name == "h4" ||
+                               name == "h5" || name == "h6" || name == "pre" || name == "code";
+            if (block) { append_break(); }
+            if (name == "li" && !closing) { out += "- "; }
+            if (name == "pre") { preformatted = !closing; }
+            i = end;
             continue;
         }
-        if (in_tag) {
-            if (c == '>') { in_tag = false; }
+        if (preformatted) {
+            if (c != '\r') { out.push_back(c); }
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            append_break();
             continue;
         }
         if (std::isspace(static_cast<unsigned char>(c))) {
@@ -116,12 +152,15 @@ std::string html_to_text(std::string_view html) {
         space = false;
         out.push_back(c);
     }
+    while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) { out.pop_back(); }
     replace_all(out, "&nbsp;", " ");
     replace_all(out, "&amp;", "&");
     replace_all(out, "&lt;", "<");
     replace_all(out, "&gt;", ">");
     replace_all(out, "&quot;", "\"");
+    replace_all(out, "&apos;", "'");
     replace_all(out, "&#39;", "'");
+    replace_all(out, "&#x27;", "'");
     return out;
 }
 
@@ -189,7 +228,7 @@ public:
     explicit WebOpenTool(const BuiltinWebOptions& options)
         : definition_(web_open_tool_definition()), max_bytes_(options.open_max_bytes),
           allow_private_network_(options.allow_private_network),
-          timeout_(options.search_timeout_ms) {}
+          timeout_(options.open_timeout_ms) {}
 
     const ToolDefinition& definition() const noexcept override { return definition_; }
 
@@ -267,17 +306,10 @@ ChatTurn tool_result_turn(const ToolCall& call, std::string result, bool is_erro
     return turn;
 }
 
-void accumulate_usage(GenerationOutcome& total, const GenerationOutcome& round) {
+void accumulate_token_usage(GenerationOutcome& total, const GenerationOutcome& round) {
     total.prompt_tokens += round.prompt_tokens;
     total.completion_tokens += round.completion_tokens;
     total.reasoning_tokens += round.reasoning_tokens;
-    total.metrics.prepare_seconds += round.metrics.prepare_seconds;
-    total.metrics.vision_seconds += round.metrics.vision_seconds;
-    total.metrics.prefill_seconds += round.metrics.prefill_seconds;
-    total.metrics.decode_seconds += round.metrics.decode_seconds;
-    total.metrics.prompt_wall_seconds += round.metrics.prompt_wall_seconds;
-    total.metrics.generation_wall_seconds += round.metrics.generation_wall_seconds;
-    total.metrics.total_seconds += round.metrics.total_seconds;
 }
 
 GenerationOutcome finalize_outcome(GenerationOutcome current, const GenerationOutcome& cumulative,
@@ -285,13 +317,6 @@ GenerationOutcome finalize_outcome(GenerationOutcome current, const GenerationOu
     current.prompt_tokens                   = cumulative.prompt_tokens;
     current.completion_tokens               = cumulative.completion_tokens;
     current.reasoning_tokens                = cumulative.reasoning_tokens;
-    current.metrics.prepare_seconds         = cumulative.metrics.prepare_seconds;
-    current.metrics.vision_seconds          = cumulative.metrics.vision_seconds;
-    current.metrics.prefill_seconds         = cumulative.metrics.prefill_seconds;
-    current.metrics.decode_seconds          = cumulative.metrics.decode_seconds;
-    current.metrics.prompt_wall_seconds     = cumulative.metrics.prompt_wall_seconds;
-    current.metrics.generation_wall_seconds = cumulative.metrics.generation_wall_seconds;
-    current.metrics.total_seconds           = cumulative.metrics.total_seconds;
     current.builtin_history                 = std::move(history);
     return current;
 }
@@ -385,6 +410,7 @@ std::shared_ptr<const BuiltinTool> make_web_open_tool(const BuiltinWebOptions& o
 BuiltinToolRegistry::BuiltinToolRegistry(const BuiltinWebOptions& options) {
     if (!options.enabled) { return; }
     if (options.max_tool_rounds == 0 || options.search_timeout_ms == 0 ||
+        options.open_timeout_ms == 0 ||
         options.search_max_results == 0 || options.open_max_bytes == 0) {
         throw std::invalid_argument("built-in Web tool limits must be positive");
     }
@@ -441,8 +467,13 @@ GenerationOutcome ToolOrchestrator::run(GenerationRequest request, GenerationOut
             }
         }
         if (builtin.empty()) {
-            accumulate_usage(cumulative, current);
+            accumulate_token_usage(cumulative, current);
             return finalize_outcome(std::move(current), cumulative, std::move(history));
+        }
+        if (!external.empty()) {
+            tool_error(400, "mixed_builtin_external_tool_calls_not_supported",
+                       "one assistant turn must not mix server-executed built-in calls with "
+                       "client-executed function or MCP calls");
         }
         if (rounds >= registry_->max_rounds()) {
             tool_error(400, "builtin_tool_round_limit", "maximum built-in tool rounds exceeded");
@@ -453,7 +484,7 @@ GenerationOutcome ToolOrchestrator::run(GenerationRequest request, GenerationOut
         }
         ++rounds;
         executed += builtin.size();
-        accumulate_usage(cumulative, current);
+        accumulate_token_usage(cumulative, current);
 
         std::vector<ToolCall> internal_calls;
         internal_calls.reserve(builtin.size());
@@ -488,10 +519,6 @@ GenerationOutcome ToolOrchestrator::run(GenerationRequest request, GenerationOut
             history.push_back(std::move(tool));
         }
 
-        if (!external.empty()) {
-            current.tool_calls = std::move(external);
-            return finalize_outcome(std::move(current), cumulative, std::move(history));
-        }
         request.max_tokens = std::max(0, request.max_tokens - current.completion_tokens);
         if (request.max_tokens == 0) {
             current.tool_calls.clear();

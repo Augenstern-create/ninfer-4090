@@ -422,16 +422,22 @@ Start Serve with a SearXNG JSON endpoint:
   --enable-builtin-web-tools \
   --searxng-url http://127.0.0.1:8081 \
   --web-search-timeout-ms 10000 \
+  --web-open-timeout-ms 10000 \
   --web-search-max-results 5 \
   --web-open-max-bytes 1048576 \
   --max-builtin-tool-rounds 4
 ```
 
 `web_search` accepts `{"query":"..."}`. Its backend calls
-`SEARXNG_URL/search?q=...&format=json` and returns bounded title/URL/snippet records. The configured
-SearXNG address is a trusted startup dependency and may be on a private address. `web_open` accepts
-`{"url":"https://..."}`, follows at most three redirects, accepts textual response types, strips
-HTML markup/script/style content, and never runs JavaScript.
+`SEARXNG_URL/search?q=...&format=json` and returns bounded title/URL/snippet records.
+`--searxng-url` is trusted operator configuration: it intentionally may name localhost or a private
+address and is not subject to the default `web_open` SSRF policy. It must come only from server
+startup configuration; never derive it from model output or user request data.
+
+`web_open` accepts `{"url":"https://..."}`, follows at most three redirects, and accepts textual
+response types. HTML handling is basic text stripping, with block/line boundaries, comments,
+script/style/noscript content, and common entities handled. It is not a browser, DOM implementation,
+or readability/article extractor, and it never executes JavaScript.
 
 `web_open` resolves and pins the destination address before every request, including every
 redirect. It permits only credential-free HTTP(S) URLs and rejects loopback, RFC1918/unique-local,
@@ -462,10 +468,20 @@ The first implementation supports aggregate requests only. A request with callab
 and `stream:true` fails before generation with `builtin_tools_streaming_not_supported`; no partial
 SSE response is emitted. This is intentional because the current encoders publish first-round
 tokens before a terminal tool-call decision and cannot retract them for a hidden continuation.
+ChatGPT Desktop and Codex clients may use `stream:true` by default, so they cannot currently use
+this built-in Web path without selecting a non-streaming Responses request. Built-in Web is not
+claimed as fully compatible with either client yet.
 Multiple built-in calls in one round execute serially. `--max-builtin-tool-rounds` bounds repeated
 generation, and Responses `max_tool_calls` additionally bounds built-in executions. If a model
-emits built-in and external calls together, NInfer executes and records only the built-in calls,
-then returns the external calls without starting a continuation that lacks their client results.
+emits built-in and external calls together, the request fails before any tool executes with
+`mixed_builtin_external_tool_calls_not_supported`. This avoids publishing a partial call graph or
+storing history that cannot be represented consistently by Chat Completions, Responses
+(`function_call_output`, `previous_response_id`, and `store`), and Anthropic `tool_result`.
+
+For non-streaming built-in continuations, `prompt_tokens`, `completion_tokens`, and
+`reasoning_tokens` are sums across every internal Engine generation. Timing, prefix-cache,
+speculative-decoding, engine-timing, and materialization metrics are retained together from the
+terminal generation round; no metric family mixes cumulative and terminal-round fields.
 
 OpenAI Responses accepts the hosted-style capability declaration when Web tools are enabled. It
 maps the declaration to local `web_search` and `web_open` functions without claiming OpenAI-hosted
@@ -939,7 +955,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--enable-builtin-web-tools` | enable the serving-layer `web_search` and `web_open` executor; requires `--searxng-url` | off |
 | `--searxng-url URL` | trusted SearXNG base URL used for JSON search | unset |
-| `--web-search-timeout-ms N` | SearXNG and `web_open` request timeout | `10000` |
+| `--web-search-timeout-ms N` | SearXNG search request timeout | `10000` |
+| `--web-open-timeout-ms N` | `web_open` request timeout | `10000` |
 | `--web-search-max-results N` | maximum SearXNG results returned to the model | `5` |
 | `--web-open-max-bytes N` | maximum response body accepted by `web_open` | `1048576` |
 | `--max-builtin-tool-rounds N` | maximum server-side generation/tool continuation rounds | `4` |

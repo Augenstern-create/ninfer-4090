@@ -24,6 +24,7 @@ struct BuiltinWebOptions {
     bool allow_private_network = false;
     std::string searxng_url;
     std::uint32_t search_timeout_ms = 10'000;
+    std::uint32_t open_timeout_ms   = 10'000;
     std::size_t search_max_results  = 5;
     std::size_t open_max_bytes      = 1ULL << 20;
     std::uint32_t max_tool_rounds   = 4;

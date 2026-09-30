@@ -86,7 +86,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] [--slot-save-path DIR] [--auto-save-evicted] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--enable-builtin-web-tools --searxng-url URL] "
-           "[--web-search-timeout-ms N] [--web-search-max-results N] "
+           "[--web-search-timeout-ms N] [--web-open-timeout-ms N] "
+           "[--web-search-max-results N] "
            "[--web-open-max-bytes N] [--max-builtin-tool-rounds N] "
            "[--web-allow-private-network] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8] "
@@ -319,6 +320,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.builtin_web.search_timeout_ms =
                 static_cast<std::uint32_t>(parse_nonnegative_int(
                     require_value("--web-search-timeout-ms"), "web-search-timeout-ms"));
+        } else if (arg == "--web-open-timeout-ms") {
+            options.builtin_web.open_timeout_ms =
+                static_cast<std::uint32_t>(parse_nonnegative_int(
+                    require_value("--web-open-timeout-ms"), "web-open-timeout-ms"));
         } else if (arg == "--web-search-max-results") {
             options.builtin_web.search_max_results = static_cast<std::size_t>(parse_nonnegative_int(
                 require_value("--web-search-max-results"), "web-search-max-results"));
@@ -438,7 +443,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.builtin_web.enabled && options.builtin_web.searxng_url.empty()) {
         throw std::invalid_argument("--enable-builtin-web-tools requires --searxng-url");
     }
-    if (options.builtin_web.search_timeout_ms == 0 || options.builtin_web.search_max_results == 0 ||
+    if (options.builtin_web.search_timeout_ms == 0 || options.builtin_web.open_timeout_ms == 0 ||
+        options.builtin_web.search_max_results == 0 ||
         options.builtin_web.open_max_bytes == 0 || options.builtin_web.max_tool_rounds == 0) {
         throw std::invalid_argument("built-in Web tool limits must be positive");
     }
