@@ -1257,10 +1257,13 @@ OpenAIResponsesCreateRequest parse_openai_responses_create_request(const Json& b
     }
     if (body.contains("include") && !body.at("include").is_null()) {
         if (!body.at("include").is_array()) { bad_request("include must be an array", "include"); }
-        if (!body.at("include").empty()) {
-            bad_request("the requested additional response fields have no available response "
-                        "representation",
-                        "include", "include_not_supported");
+        for (const Json& include : body.at("include")) {
+            if (!include.is_string() ||
+                include.get_ref<const std::string&>() != "reasoning.encrypted_content") {
+                bad_request("the requested additional response fields have no available response "
+                            "representation",
+                            "include", "include_not_supported");
+            }
         }
     }
     if (body.contains("stream_options") && !body.at("stream_options").is_null()) {

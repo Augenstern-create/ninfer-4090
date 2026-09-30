@@ -213,6 +213,34 @@ int test_budgets_and_nonsemantic_hints() {
     failures += check(accepted.max_tool_calls == 0,
                       "typed nonsemantic hints are accepted without changing generation");
 
+    for (const Json include_value :
+         {Json::array(), Json::array({"reasoning.encrypted_content"}),
+          Json::array({"reasoning.encrypted_content", "reasoning.encrypted_content"})}) {
+        Json compatible       = base;
+        compatible["include"] = include_value;
+        failures += check(parse_openai_responses_create_request(compatible, limits()).prompt.model ==
+                              "m",
+                          "compatible encrypted reasoning include hint was rejected");
+    }
+    for (const Json include_value :
+         {Json::array({"unknown"}),
+          Json::array({"reasoning.encrypted_content", "unknown"}), Json::array({7})}) {
+        Json unsupported       = base;
+        unsupported["include"] = include_value;
+        failures += check(api_code([&] {
+                              (void)parse_openai_responses_create_request(unsupported, limits());
+                          }) == "include_not_supported",
+                          "unsupported include hint was accepted");
+    }
+    Json malformed       = base;
+    malformed["include"] = "reasoning.encrypted_content";
+    const ApiError malformed_error = api_error([&] {
+        (void)parse_openai_responses_create_request(malformed, limits());
+    });
+    failures += check(malformed_error.status == 400 && malformed_error.param == "include" &&
+                          malformed_error.message == "include must be an array",
+                      "non-array include did not retain its validation error");
+
     hints["client_metadata"] = nullptr;
     failures += check(parse_openai_responses_create_request(hints, limits()).prompt.model == "m",
                       "null client_metadata is neutral");
