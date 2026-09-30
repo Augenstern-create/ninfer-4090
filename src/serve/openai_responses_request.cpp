@@ -810,8 +810,17 @@ void parse_tools(const Json& body, ParsedPromptFields& out, const RequestLimits&
                 bad_request("tool type 'web_search' requires built-in Web tools to be enabled",
                             "tools", "tool_type_not_supported");
             }
-            static const std::unordered_set<std::string> allowed_web_search = {"type"};
+            static const std::unordered_set<std::string> allowed_web_search = {
+                "type",
+                "external_web_access",
+            };
             reject_nonnull_unknown_members(item, allowed_web_search, "tools");
+
+            if (item.contains("external_web_access") &&
+                !item.at("external_web_access").is_null() &&
+                !item.at("external_web_access").is_boolean()) {
+                bad_request("web_search external_web_access must be a boolean", "tools");
+            }
             ParsedFunctionTool search;
             search.definition  = web_search_tool_definition();
             search.engine_name = search.definition.name;
@@ -961,11 +970,24 @@ void parse_reasoning(const Json& body, OpenAIResponsesPromptRequest& out) {
     static const std::unordered_set<std::string> allowed = {"effort", "context", "summary",
                                                             "generate_summary", "mode"};
     reject_nonnull_unknown_members(reasoning, allowed, "reasoning");
-    for (const char* key : {"context", "summary", "generate_summary", "mode"}) {
+    for (const char* key : {"context", "generate_summary", "mode"}) {
         if (reasoning.contains(key) && !reasoning.at(key).is_null()) {
-            bad_request("reasoning." + std::string(key) +
-                            " changes reasoning input or output and is not supported",
-                        "reasoning", "reasoning_option_not_supported");
+        bad_request("reasoning." + std::string(key) +
+                        " changes reasoning input or output and is not supported",
+                    "reasoning", "reasoning_option_not_supported");
+        }
+    }
+
+    if (reasoning.contains("summary") && !reasoning.at("summary").is_null()) {
+        if (!reasoning.at("summary").is_string()) {
+            bad_request("reasoning.summary must be a string", "reasoning");
+        }
+
+        const std::string summary = reasoning.at("summary").get<std::string>();
+        if (summary != "auto" && summary != "concise" && summary != "detailed") {
+         bad_request(
+            "reasoning.summary must be one of auto, concise, or detailed",
+            "reasoning");
         }
     }
     if (!reasoning.contains("effort") || reasoning.at("effort").is_null()) { return; }

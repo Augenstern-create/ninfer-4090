@@ -741,27 +741,48 @@ int test_namespace_tools() {
     failures += check(oversized_output.at("namespace") == std::string(60, 'n') &&
                           oversized_output.at("name") == "tool",
                       "long alias restores the original wire namespace and name");
-    const OpenAIResponsesCreateRequest oversized_replay = parse_openai_responses_create_request(
-        Json{{"model", "m"},
-             {"input", Json::array({oversized_output,
-                                     Json{{"type", "function_call_output"},
-                                          {"call_id", oversized_output.at("call_id")},
-                                          {"namespace", std::string(60, 'n')},
-                                          {"name", "tool"},
-                                          {"output", "done"}}})}},
-        limits());
+    const OpenAIResponsesCreateRequest oversized_replay =
+        parse_openai_responses_create_request(
+            Json{{"model", "m"},
+                 {"input",
+                  Json::array({
+                      Json{{"role", "user"}, {"content", "Use the tool."}},
+                      oversized_output,
+                      Json{{"type", "function_call_output"},
+                           {"call_id", oversized_output.at("call_id")},
+                           {"namespace", std::string(60, 'n')},
+                           {"name", "tool"},
+                           {"output", "done"}},
+                  })}},
+            limits());
+
     OpenAIResponsesStore alias_store(8, 1ULL << 20);
-    const OpenAIResponsesResolvedPrompt oversized_resolved = resolve_openai_responses_prompt(
-        oversized_replay.prompt, alias_store, "resp_long_replay", true);
-    failures += check(oversized_resolved.generation.messages[0].tool_calls[0].name == alias &&
-                          oversized_resolved.generation.messages[1].tool_result_name == alias,
-                      "long namespace call and output round-trip through the Engine alias");
+    const OpenAIResponsesResolvedPrompt oversized_resolved =
+        resolve_openai_responses_prompt(
+            oversized_replay.prompt,
+            alias_store,
+            "resp_long_replay",
+            true);
+
+    failures += check(
+        oversized_resolved.generation.messages.size() >= 3 &&
+            !oversized_resolved.generation.messages[1].tool_calls.empty() &&
+            oversized_resolved.generation.messages[1].tool_calls[0].name == alias &&
+            oversized_resolved.generation.messages[2].tool_result_name.has_value() &&
+            *oversized_resolved.generation.messages[2].tool_result_name == alias,
+        "long namespace call and output round-trip through the Engine alias");
+
     Json alias_collision = oversized;
-    alias_collision["tools"].push_back(Json{{"type", "function"}, {"name", alias}});
-    failures += check(api_code([&] {
-                          (void)parse_openai_responses_create_request(alias_collision, limits());
-                      }) == "duplicate_tool_name",
-                      "stable alias collisions are detected explicitly");
+    alias_collision["tools"].push_back(
+        Json{{"type", "function"}, {"name", alias}});
+
+    failures += check(
+        api_code([&] {
+            (void)parse_openai_responses_create_request(
+                alias_collision, limits());
+        }) == "duplicate_tool_name",
+        "stable alias collisions are detected explicitly");
+
     return failures;
 }
 
